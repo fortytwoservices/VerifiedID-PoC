@@ -33,7 +33,7 @@ A comprehensive PowerShell module for deploying and managing Microsoft Entra Ver
 
 ### Azure Requirements
 - **Azure Subscription** with appropriate permissions
-- **Azure AD Tenant** with Microsoft Entra Verified ID enabled
+- **Entra ID Tenant** with Microsoft Entra Verified ID enabled
 - **Global Administrator** or **Application Administrator** role (for delegated auth)
 - **Custom Domain** (optional, can use storage static website domain)
 
