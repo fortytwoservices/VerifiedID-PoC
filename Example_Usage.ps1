@@ -8,75 +8,50 @@
 # 1. Install required Azure PowerShell modules
 # Install-Module -Name Az.Accounts, Az.Resources, Az.Storage, Az.KeyVault -Force
 
-# 2. Import the Verified ID module
+# 2. Authenticate with Azure CLI
+# az login
+
+# 3. Import the Verified ID module
 # Import-Module .\VerifiedID.psm1 -Force
 
 #==============================================================================
-# Example 1: Complete Deployment with Delegated Authentication
+# Example 1: Complete Deployment
 #==============================================================================
 
 <#
-This example uses your current user credentials (delegated authentication).
-Best for: Development, testing, and scenarios where you have admin rights.
+This example deploys complete Verified ID infrastructure using delegated auth.
+Requires: User logged in with az login and having Verified ID Administrator role
 
-Note: The script automatically handles ALL setup steps:
-  ✅ Creates Azure resources
-  ✅ Creates app registration  
+The script automatically handles:
+  ✅ Creates Azure resources (storage, key vault, etc.)
   ✅ Creates Verified ID Authority
   ✅ Generates and uploads DID documents
-  ✅ Validates domain
-  ✅ Registers DID
+  ✅ Makes documents publicly accessible
+  ✅ Validates domain ownership (automatic - documents verified accessible)
+  ✅ Registers DID automatically
   
-Upon completion, your Verified ID is fully ready to use!
+No manual steps required!
 #>
 
 # Basic deployment with auto-generated names
-$deployment1 = Deploy-VerifiedIdInfrastructure `
+$deployment = Deploy-VerifiedIdInfrastructure `
     -SubscriptionId "your-subscription-id" `
     -ResourceGroupName "rg-verifiedid-demo" `
     -Location "East US" `
-    -TenantId "your-tenant-id" `
-    -UseDelegatedAuth
+    -TenantId "your-tenant-id"
 
 # Custom deployment with specific names
-$deployment2 = Deploy-VerifiedIdInfrastructure `
+$deployment = Deploy-VerifiedIdInfrastructure `
     -SubscriptionId "your-subscription-id" `
     -ResourceGroupName "rg-verifiedid-prod" `
     -Location "West Europe" `
     -TenantId "your-tenant-id" `
     -Prefix "companyname" `
     -AuthorityName "CompanyCredentials" `
-    -ContractName "EmployeeID" `
-    -UseDelegatedAuth
+    -ContractName "EmployeeID"
 
 #==============================================================================
-# Example 2: Complete Deployment with Application Authentication
-#==============================================================================
-
-<#
-This example creates an app registration for service-to-service authentication.
-Best for: Production environments, automation, CI/CD pipelines.
-
-Note: The app registration will be granted necessary permissions automatically.
-#>
-
-$deployment3 = Deploy-VerifiedIdInfrastructure `
-    -SubscriptionId "your-subscription-id" `
-    -ResourceGroupName "rg-verifiedid-prod" `
-    -Location "West US 2" `
-    -TenantId "your-tenant-id" `
-    -AppName "VerifiedIdServiceApp" `
-    -Prefix "acme" `
-    -AuthorityName "ACMEEmployeeCredentials" `
-    -ContractName "ACMEEmployeeCard"
-
-# The deployment returns useful information:
-Write-Host "Authority DID: $($deployment3.Authority.didModel.did)"
-Write-Host "Contract ID: $($deployment3.Contract.id)"
-Write-Host "Storage URL: $($deployment3.StorageAccount.PrimaryEndpoints.Web)"
-
-#==============================================================================
-# Example 3: Infrastructure-Only Deployment
+# Example 2: Infrastructure-Only Deployment
 #==============================================================================
 
 <#
@@ -99,7 +74,7 @@ $infraOnly = Deploy-VerifiedIdInfrastructureOnly `
 # $authority = New-VerifiedIdAuthority -AccessToken $token -Name "MyAuthority" -DidDomain "https://myorg-sto-1234.z13.web.core.windows.net"
 
 #==============================================================================
-# Example 4: Working with Existing Infrastructure
+# Example 3: Working with Existing Infrastructure
 #==============================================================================
 
 <#
@@ -132,7 +107,7 @@ $contract2 = New-VerifiedIdContract `
     -Claims @("courseName", "completionDate", "score", "instructor")
 
 #==============================================================================
-# Example 5: Credential Issuance
+# Example 4: Credential Issuance
 #==============================================================================
 
 <#
@@ -197,25 +172,34 @@ $didDocs = New-DidDocument `
 # 3. Ensure files have 'application/json' content type
 
 #==============================================================================
-# Example 8: Domain Validation
+# Example 8: Domain Ownership Verification (Automatic, Optional Retry)
 #==============================================================================
 
 <#
-Validate that your domain properly hosts the required DID documents.
+Domain ownership verification is AUTOMATIC during deployment.
+The script validates that your DID documents are accessible at the domain URL.
+
+This confirms you control the domain - no manual steps needed!
+
+If verification was still pending during deployment, you can manually retry.
 #>
 
-$validation = Test-WellKnownDidConfiguration `
-    -AccessToken $token `
-    -AuthorityId $authority.authorityId `
-    -DomainUrl "https://myorg-sto-1234.z13.web.core.windows.net"
+# Get your authority ID from deployment output
+$authorityId = $deployment.AuthorityId
+
+# Automatic verification already happened during deployment.
+# If you need to verify status or retry:
+$validation = Test-WellKnownDidConfiguration -AuthorityId $authorityId
 
 if ($validation.isValid) {
-    Write-Host "✓ Domain validation successful" -ForegroundColor Green
+    Write-Host "✓ Domain ownership verified" -ForegroundColor Green
+    Write-Host "✓ DID registered automatically" -ForegroundColor Green
 }
 else {
-    Write-Host "⚠ Domain validation failed:" -ForegroundColor Yellow
-    $validation.errors | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    Write-Host "Domain verification in progress. Try again in 30-60 seconds." -ForegroundColor Yellow
+    Write-Host "Command: Test-WellKnownDidConfiguration -AuthorityId '$authorityId'" -ForegroundColor Gray
 }
+
 
 #==============================================================================
 # Example 9: Cleanup and Removal
@@ -239,14 +223,16 @@ Remove-VerifiedIdInfrastructure `
 <#
 Deployment Timing (typical):
 - Infrastructure Only: 1-2 minutes
-- Complete Deployment: 4-6 minutes
+- Complete Deployment: 1-2 minutes (fully automated)
   - Infrastructure: ~30 seconds
-  - Authority creation: ~75 seconds (includes retries)
-  - Document propagation: ~105 seconds
-  - Domain validation: ~30 seconds
+  - Authority creation: ~10 seconds
+  - Authority propagation wait: ~75 seconds (includes retries)
+  - Document generation & upload: ~20 seconds
+  - Storage replication & validation: ~45 seconds
+  - Total: ~1-2 minutes
 
 The module includes strategic wait periods to handle Azure propagation delays.
-These ensure reliable deployment on the first run instead of requiring multiple attempts.
+Domain ownership verification is fully automatic - no manual steps needed!
 #>
 
 #==============================================================================
@@ -254,28 +240,35 @@ These ensure reliable deployment on the first run instead of requiring multiple 
 #==============================================================================
 
 <#
-1. Domain Validation Fails:
-   - Wait 2-3 minutes for global CDN propagation
-   - Verify storage account has static website enabled
-   - Check that DID documents are properly uploaded
+1. Domain Ownership Verification Not Confirming:
+   - Normal! Azure Storage replication takes 30-60 seconds
+   - Wait a moment, then run: Test-WellKnownDidConfiguration -AuthorityId $authorityId
+   - If still pending, wait 1-2 minutes and retry
 
-2. Authority Creation Fails:
-   - Ensure you have sufficient permissions in the tenant
-   - Check that the domain URL is accessible
-   - Verify Key Vault exists and is accessible
+2. Domain Ownership Verification Fails:
+   - Check DID documents are properly uploaded to storage
+   - Verify storage account static website is enabled
+   - Check /.well-known/did.json and /.well-known/did-configuration.json exist
+   - Wait 45 seconds to 2 minutes for storage replication, then retry
 
-3. Storage Upload Fails:
+3. Authority Creation Fails:
+   - Ensure you have Verified ID Administrator role
+   - Check Key Vault exists and is accessible
+   - Verify storage account URL is reachable
+   - Try redeploying if first attempt fails
+
+4. Storage Upload Fails:
    - Check RBAC permissions on storage account
    - Verify storage account has static website enabled
    - Try with storage account keys if RBAC fails
 
-4. Authentication Issues:
-   - For delegated auth: Ensure you're logged in with Connect-AzAccount
-   - For app auth: Verify app registration has correct permissions
-   - Check tenant ID is correct
+5. Authentication Issues:
+   - For delegated auth: Run 'az login' first
+   - Ensure you have Verified ID Administrator role
+   - Check correct tenant ID
 
-5. Permission Errors:
+6. Permission Errors:
    - Ensure Global Admin or Application Administrator role
-   - For production: Use app registration with proper permissions
-   - Verify service principal has required Azure RBAC roles
+   - Verify user has Verified ID Administrator role in tenant
+   - Check service principal has required Azure RBAC roles
 #>

@@ -8,7 +8,6 @@ A comprehensive PowerShell module for deploying and managing Microsoft Entra Ver
 - **Azure Resource Group** creation and management
 - **Storage Account** with static website hosting for DID documents  
 - **Key Vault** with proper access policies for secure key storage
-- **App Registration** with required permissions (optional)
 - **Service Principal** configuration with appropriate roles
 
 ### Verified ID Management
@@ -34,13 +33,11 @@ The `Deploy-VerifiedIdInfrastructure` function fully automates all the manual st
 | Step | Manual Process | Automated By Script |
 |------|---|---|
 | **1. Infrastructure** | Create storage account, key vault | ✅ Automatic |
-| **2. App Registration** | Create app + assign permissions | ✅ Automatic |
-| **3. Authority Creation** | Create via Portal | ✅ Automatic |
-| **4. DID Documents** | Generate via Admin API | ✅ Automatic |
-| **5. Upload DID Documents** | Manual upload to storage | ✅ Automatic |
-| **6. Domain Validation** | Click "Refresh" button in Portal | ✅ Automatic |
-| **7. DID Registration** | Click "Register" button in Portal | ✅ Automatic |
-| **8. Verify Domain** | Manual verification | ✅ Automatic |
+| **2. Authority Creation** | Create via Portal | ✅ Automatic |
+| **3. DID Documents** | Generate via Admin API | ✅ Automatic |
+| **4. Upload DID Documents** | Manual upload to storage | ✅ Automatic |
+| **5. Domain Validation** | Click "Refresh" button in Portal | ✅ Automatic |
+| **6. DID Registration** | Click "Register" button in Portal | ✅ Automatic |
 
 **Result**: All three setup checkmarks in Azure Portal ✅ automatically completed on first run!
 
@@ -53,14 +50,13 @@ The `Deploy-VerifiedIdInfrastructure` function fully automates all the manual st
 ### Azure Requirements
 - **Azure Subscription** with appropriate permissions
 - **Entra ID Tenant** with Microsoft Entra Verified ID enabled
-- **Global Administrator** or **Application Administrator** role (for delegated auth)
+- **Global Administrator** or **Application Administrator** role in the tenant
+- **Azure CLI** (`az login`) authenticated before running the script
 - **Custom Domain** (optional, can use storage static website domain)
 
-### Permissions
-For production deployments, the service principal needs:
-- `VerifiedId.Authority.Create` (Microsoft Graph)
-- `VerifiedId.Authority.ReadWrite.All` (Microsoft Graph)
-- Contributor role on the Azure subscription or resource group
+### Authentication
+- **Delegated User Authentication**: Script uses your user credentials via `az login`
+- **App-Only Authentication**: Not currently supported due to Microsoft API limitations
 
 ## [⚙] Installation
 
@@ -88,33 +84,31 @@ Get-Command -Module VerifiedID
 
 ## [>] Quick Start
 
-### Basic Deployment (Delegated Auth)
+### Prerequisites
+1. Ensure you have PowerShell 7+ and Az modules installed
+2. Authenticate with Azure and Verified ID scope:
+   ```powershell
+   az login
+   az account set --subscription "your-subscription-id"
+   ```
+3. Import the module:
+   ```powershell
+   Import-Module .\VerifiedID.psm1 -Force
+   ```
+
+### Basic Deployment
 ```powershell
-# Simple deployment using your current credentials
+# Deploy complete Verified ID infrastructure
+# Uses your current user credentials (must be logged in with az login)
 $deployment = Deploy-VerifiedIdInfrastructure `
     -SubscriptionId "your-subscription-id" `
     -ResourceGroupName "rg-verifiedid-demo" `
     -Location "East US" `
-    -TenantId "your-tenant-id" `
-    -UseDelegatedAuth
+    -TenantId "your-tenant-id"
 
 # Access results
 Write-Host "Authority DID: $($deployment.Authority.didModel.did)"
 Write-Host "Storage URL: $($deployment.StorageAccount.PrimaryEndpoints.Web)"
-```
-
-### Production Deployment (App Registration)
-```powershell
-# Production deployment with service principal
-$deployment = Deploy-VerifiedIdInfrastructure `
-    -SubscriptionId "your-subscription-id" `
-    -ResourceGroupName "rg-verifiedid-prod" `
-    -Location "West US 2" `
-    -TenantId "your-tenant-id" `
-    -AppName "VerifiedIdServiceApp" `
-    -Prefix "companyname" `
-    -AuthorityName "CompanyCredentials" `
-    -ContractName "EmployeeID"
 ```
 
 ### Infrastructure Only
@@ -130,31 +124,36 @@ $infra = Deploy-VerifiedIdInfrastructureOnly `
 
 ## [⏱] Timing Expectations
 
-**Complete Deployment**: 4-6 minutes (fully automated)
+**Complete Deployment**: 1-2 minutes (fully automated)
 - Infrastructure creation: ~30 seconds
 - Authority creation: ~10 seconds
 - Authority propagation wait: ~75 seconds  
 - DID document generation & upload: ~20 seconds
-- Domain propagation wait: ~105 seconds
-- Domain validation & DID registration: ~30 seconds
+- Storage replication & validation: ~45 seconds
+- Total: ~1-2 minutes
 
 **Infrastructure Only**: 1-2 minutes
 
-The module includes strategic wait periods to handle Azure propagation delays, ensuring reliable deployment on the first run. **Upon completion, your Verified ID is fully set up and ready to use** - no additional portal steps required.
+The script includes strategic wait periods to handle Azure propagation. Domain ownership is automatically verified when DID documents are validated as accessible at the domain.
 
-## [*] Authentication Modes
+## [*] Authentication
 
-### Delegated Authentication (`-UseDelegatedAuth`)
-- Uses your current user credentials
-- Best for: Development, testing, interactive scenarios
-- Requires: Global Admin or Application Administrator role
-- Limitations: Cannot remove authorities (manual removal required)
+### How It Works
+The script uses **delegated user authentication** - your current user credentials from `az login`:
 
-### Application Authentication (Default)
-- Creates dedicated app registration and service principal
-- Best for: Production, automation, CI/CD pipelines  
-- Requires: Sufficient permissions to create app registrations
-- Benefits: Full programmatic control, can remove authorities
+1. User logs in with `az login` (requires Global Admin or Application Administrator role)
+2. Script acquires delegated token using Azure CLI
+3. Token carries your user's permissions for Verified ID operations
+4. All operations execute with your admin context
+
+### Why Delegated Auth Only?
+- **Required by Microsoft**: Authority creation requires user context
+- **Simpler Setup**: No app registration needed, uses existing credentials
+- **Immediate Access**: User permissions apply immediately, no propagation delays
+- **Reduced Complexity**: Fewer moving parts, easier troubleshooting
+
+### App-Only Authentication
+❌ **Not currently supported** - Microsoft Verified ID APIs require user context for authority operations. Creating authorities with service principal credentials results in 403 Forbidden errors.
 
 ## [*] Core Functions
 
@@ -178,9 +177,6 @@ The module includes strategic wait periods to handle Azure propagation delays, e
 - `New-DidDocument` - Generate DID documents via Admin API
 - `New-WellKnownDidConfiguration` - Generate well-known configuration
 - `Test-WellKnownDidConfiguration` - Validate domain linkage
-- `Register-VerifiedIdDomain` - Register DID with authority (triggers domain validation)
-- `New-VerifiedIdDnsConfiguration` - Generate DNS records for domain binding
-- `Test-VerifiedIdDnsBinding` - Validate DNS binding configuration
 - `Register-VerifiedIdDomain` - Register DID with authority (triggers domain validation)
 - `New-VerifiedIdDnsConfiguration` - Generate DNS records for domain binding
 - `Test-VerifiedIdDnsBinding` - Validate DNS binding configuration
@@ -241,27 +237,28 @@ VerifiedID_Module/
 
 **Step 5-7: Verified ID Setup**
 ```powershell
-✅ Acquires access tokens (delegated + app-only)
+✅ Acquires delegated user token
 ✅ Creates Verified ID Authority 
 ✅ Waits 75 seconds for propagation
 ✅ Validates prerequisites
 ```
 
-**Step 8: DID Documents & Registration**
+**Step 8: DID Documents & Domain Ownership**
 ```powershell
 ✅ Generates real DID documents via Admin API
 ✅ Uploads did.json to storage
 ✅ Uploads did-configuration.json to storage
 ✅ Validates document accessibility
-✅ Waits 105 seconds for CDN propagation
-✅ Performs domain validation (Portal "Refresh" equivalent)
-✅ Registers DID domain (Portal "Register" equivalent)
-✅ Verifies domain ownership
+✅ Waits 45 seconds for storage replication
+✅ Verifies domain ownership (documents are accessible)
+✅ Automatically registers DID
 ```
 
-**Result: Three Portal checkmarks ✅✅✅**
+**Result: All three Portal checkmarks ✅✅✅ automatically**
 
-All manual Portal setup steps are now automated!
+- ✅ Configure organization (Authority created)
+- ✅ Register decentralized ID (DID documents hosted)
+- ✅ Verify domain ownership (Documents validated as accessible)
 
 ## [*] Advanced Usage
 
@@ -305,22 +302,66 @@ $presentation = Start-VcPresentation `
     -ValidateLinkedDomain
 ```
 
+### Domain Ownership Verification (Automatic)
+
+During deployment, the script automatically verifies domain ownership:
+
+```powershell
+# Script validates that DID documents are hosted and accessible
+# This proves you control the domain
+# ✅ Verification automatic - no manual action needed
+```
+
+**If verification needs retry:**
+```powershell
+# Run this if initial verification was still propagating
+$authorityId = "5f8fcf85-eb11-4207-551a-b29d4475d57d"  # Example
+Test-WellKnownDidConfiguration -AuthorityId $authorityId
+```
+
+**What happens:**
+1. Script uploads `did.json` and `did-configuration.json` to storage
+2. Waits 45 seconds for Azure Storage to replicate files globally
+3. Microsoft's service fetches and validates these files exist
+4. ✅ Domain ownership confirmed (you proved you control the domain)
+5. ✅ DID automatically registered
+
+**Helpful Resources:**
+- [Quickstart Guide](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart)
+- [Issue Credentials](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-idtoken)
+- [Request Presentations](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-presentation)
+- [Self-Issued Credentials](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-selfissued)
+- [Rules & Display Model](https://learn.microsoft.com/en-us/entra/verified-id/rules-and-display-definitions-model)
+- [Credential Revocation](https://learn.microsoft.com/en-us/entra/verified-id/how-to-issuer-revoke)
+
 ## [?] Troubleshooting
 
 ### Common Issues and Solutions
 
-**Domain Validation Fails**
+**Domain Ownership Verification Not Confirming**
 ```
-Wait 2-3 minutes for global CDN propagation
+This is normal! Azure Storage replication takes 30-60 seconds.
+After deployment:
+1. If still pending, wait another 30 seconds
+2. Run: Test-WellKnownDidConfiguration -AuthorityId $authorityId
+3. If still pending, wait 1-2 more minutes and retry
+```
+
+**Domain Ownership Verification Fails**
+```
+Check DID documents are properly uploaded:
+- did.json at /.well-known/did.json (HTTP 200 response)
+- did-configuration.json at /.well-known/did-configuration.json (HTTP 200 response)
 Verify storage static website is enabled
-Check DID documents are properly uploaded
+Wait 45 seconds to 2 minutes for Azure Storage replication, then retry
 ```
 
 **Authority Creation Fails**  
 ```
-Ensure sufficient tenant permissions
+Ensure you have Verified ID Administrator role
 Verify Key Vault accessibility
-Check domain URL is reachable
+Check storage account static website URL is accessible
+Try redeploying if first attempt fails
 ```
 
 **Storage Upload Fails**
@@ -332,9 +373,9 @@ Try storage account keys if RBAC fails
 
 **Authentication Issues**
 ```
-For delegated: Use Connect-AzAccount first
-For app auth: Verify app registration permissions
-Confirm correct tenant ID
+For delegated auth: Use 'az login' first
+Confirm user has Verified ID Administrator role
+Verify correct tenant ID
 ```
 
 ### Debug Mode

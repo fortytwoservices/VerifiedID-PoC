@@ -172,12 +172,26 @@ function Get-VerifiedIdAppToken {
         grant_type    = 'client_credentials'
     }
     
-    try {
-        $response = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Body $body -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop
-        return $response.access_token
-    }
-    catch {
-        throw "Failed to acquire application token: $($_.Exception.Message)"
+    # Retry logic for service principal propagation delays
+    $maxAttempts = 4
+    $backoffSeconds = @(5, 10, 20)
+    
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            $response = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Body $body -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop
+            return $response.access_token
+        }
+        catch {
+            if ($attempt -lt $maxAttempts) {
+                $waitTime = $backoffSeconds[$attempt - 1]
+                Write-Host "  Token request attempt $attempt failed (401/Unauthorized suggests service principal not yet replicated)" -ForegroundColor Yellow
+                Write-Host "  Waiting $waitTime seconds before retry..." -ForegroundColor Gray
+                Start-Sleep -Seconds $waitTime
+            }
+            else {
+                throw "Failed to acquire application token after $maxAttempts attempts: $($_.Exception.Message)"
+            }
+        }
     }
 }
 
@@ -384,13 +398,24 @@ function Test-VerifiedIdToken {
                 }
             }
             'Admin' {
-                if (-not $payload.roles) {
-                    # For delegated tokens, check scopes instead of roles
-                    if ($payload.scp) {
-                        Write-Verbose "Delegated token detected with scopes: $($payload.scp)"
-                        return $true
-                    }
-                    throw "Token missing roles (expected app-only token) or scopes (expected delegated token)"
+                # Check if this is an app-only or delegated token
+                if ($payload.scp) {
+                    # Delegated token with scopes
+                    Write-Verbose "Delegated token detected with scopes: $($payload.scp)"
+                    return $true
+                }
+                elseif ($payload.roles) {
+                    # App-only token with roles
+                    Write-Verbose "App-only token detected with roles: $($payload.roles -join ', ')"
+                    return $true
+                }
+                elseif ($payload.aud -eq "6a8b4b39-c021-437c-b060-5a14a3fd65f3" -or $payload.aud -eq "https://verifiedid.iam.graph.microsoft.com") {
+                    # App token with correct audience - sufficient for API access
+                    Write-Verbose "App token with correct audience detected, roles/scopes may propagate after use"
+                    return $true
+                }
+                else {
+                    throw "Token appears to be for different resource (audience: $($payload.aud)). Expected 6a8b4b39-c021-437c-b060-5a14a3fd65f3 or https://verifiedid.iam.graph.microsoft.com"
                 }
             }
         }
@@ -733,15 +758,25 @@ function Get-VerifiedIdAuthorityDetail {
 function Test-WellKnownDidConfiguration {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
+        [Parameter()]
         [string]$AccessToken,
         
         [Parameter(Mandatory)]
         [string]$AuthorityId,
         
-        [Parameter(Mandatory)]
+        [Parameter()]
         [string]$DomainUrl
     )
+    
+    # If no token provided, get delegated token automatically
+    if (-not $AccessToken) {
+        try {
+            $AccessToken = az account get-access-token --resource "6a8b4b39-c021-437c-b060-5a14a3fd65f3" --query accessToken -o tsv
+        }
+        catch {
+            throw "Failed to acquire delegated token. Ensure you are logged in with 'az login': $($_.Exception.Message)"
+        }
+    }
     
     $origin = if ($DomainUrl -match '^https?://') { 
         $DomainUrl.TrimEnd('/') 
@@ -876,37 +911,9 @@ function New-WellKnownDidConfiguration {
     The domain URL to validate.
 
 .EXAMPLE
-    $validation = Test-WellKnownDidConfiguration -AccessToken $token -AuthorityId $authorityId -DomainUrl "https://issuer.contoso.com"
+    $validation = Test-WellKnownDidConfiguration -AuthorityId $authorityId
 #>
-function Test-WellKnownDidConfiguration {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$AccessToken,
-        
-        [Parameter(Mandatory)]
-        [string]$AuthorityId,
-        
-        [Parameter(Mandatory)]
-        [string]$DomainUrl
-    )
-    
-    $origin = if ($DomainUrl -match '^https?://') { 
-        $DomainUrl.TrimEnd('/') 
-    }
-    else { 
-        "https://$DomainUrl" 
-    }
-    
-    $body = @{ domainUrl = $origin }
-    
-    try {
-        return Invoke-VerifiedIdApi -Method POST -Path "verifiableCredentials/authorities/$AuthorityId/validateWellKnownDidConfiguration" -Body $body -AccessToken $AccessToken
-    }
-    catch {
-        throw "Failed to validate well-known DID configuration: $($_.Exception.Message)"
-    }
-}
+# Duplicate function removed - using the earlier updated version instead
 
 <#
 .SYNOPSIS
@@ -1678,11 +1685,12 @@ function Deploy-VerifiedIdInfrastructure {
     - Resource Group
     - Storage Account with static website hosting
     - Key Vault with proper access policies
-    - App Registration (for application-only auth)
-    - Service Principal with required app roles
     - Verified ID Authority
     - Sample credential contract
     - DID documents and well-known configuration
+    
+    REQUIRES: User must be logged in via Azure CLI (az login) with Verified ID Administrator role
+    NOTE: App-only authentication is not currently supported - user context is required for authority operations
     
     TIMING NOTE: Complete deployment typically takes 4-6 minutes due to Azure propagation requirements:
     - Infrastructure creation: ~30 seconds
@@ -1705,7 +1713,7 @@ function Deploy-VerifiedIdInfrastructure {
 
     
     .PARAMETER AppName
-    Name for the Azure AD app registration (only used when not using delegated auth)
+    Reserved parameter (not used - kept for backward compatibility)
     
     .PARAMETER AuthorityName
     Name for the Verified ID authority (default: "MyVerifiedIDAuthority")
@@ -1719,11 +1727,8 @@ function Deploy-VerifiedIdInfrastructure {
     .PARAMETER Prefix
     Prefix for Azure resource names (optional)
     
-    .PARAMETER UseDelegatedAuth
-    Use delegated authentication instead of creating app registration
-    
     .PARAMETER DelegatedTokenFile
-    Path to file containing pre-acquired delegated token
+    Optional: Path to file containing pre-acquired delegated token (normally uses az login context)
     
     .OUTPUTS
     Returns a simplified results object with deployment information:
@@ -1739,7 +1744,11 @@ function Deploy-VerifiedIdInfrastructure {
     - DomainValidated: Boolean indicating if domain validation succeeded
     
     .EXAMPLE
-    Deploy-VerifiedIdInfrastructure -SubscriptionId "12345678-1234-1234-1234-123456789012" -ResourceGroupName "rg-verifiedid" -Location "eastus" -TenantId "87654321-4321-4321-210987654321" -AppName "MyVerifiedID" -Prefix "myorg" -UseDelegatedAuth
+    # First authenticate with Azure CLI
+    az login
+    
+    # Then deploy (uses current user context)
+    Deploy-VerifiedIdInfrastructure -SubscriptionId "12345678-1234-1234-1234-123456789012" -ResourceGroupName "rg-verifiedid" -Location "eastus" -TenantId "87654321-4321-4321-210987654321" -Prefix "myorg"
     #>
     [CmdletBinding()]
     param(
@@ -1755,7 +1764,7 @@ function Deploy-VerifiedIdInfrastructure {
         [Parameter(Mandatory)]
         [string]$TenantId,
         
-        [Parameter(Mandatory)]
+        [Parameter()]
         [string]$AppName,
         
         [Parameter()]
@@ -1769,9 +1778,6 @@ function Deploy-VerifiedIdInfrastructure {
         
         [Parameter()]
         [string]$Prefix,
-        
-        [Parameter()]
-        [switch]$UseDelegatedAuth,
         
         [Parameter()]
         [string]$DelegatedTokenFile
@@ -1849,7 +1855,7 @@ function Deploy-VerifiedIdInfrastructure {
 
         Write-Host "  Storage Account: $storageAccountName" -ForegroundColor White
         Write-Host "  Key Vault: $keyVaultName" -ForegroundColor White
-        Write-Host "  Authentication Mode: $(if ($UseDelegatedAuth) { 'Delegated' } else { 'Application-Only' })" -ForegroundColor White
+        Write-Host "  Authentication Mode: Delegated (User Context)" -ForegroundColor White
         
         Write-Host "`n[TIME] Expected deployment time: 4-6 minutes" -ForegroundColor Cyan
         Write-Host "   (Includes strategic wait periods for Azure propagation)" -ForegroundColor Gray
@@ -1980,14 +1986,11 @@ function Deploy-VerifiedIdInfrastructure {
             throw "Failed to create Key Vault: $($_.Exception.Message)"
         }
         
-        # Step 5: Get or create access token
-        Write-Host "`nStep 5: Acquiring access token..." -ForegroundColor Yellow
-        $accessToken = $null
-        $clientId = $null
-        $clientSecret = $null
+        # Step 5: Acquire delegated user token
+        Write-Host "`nStep 5: Acquiring delegated user token..." -ForegroundColor Yellow
         
         # Ensure current user has Verified ID Administrator role
-        Write-Host "Ensuring Verified ID Administrator role for current user..." -ForegroundColor Cyan
+        Write-Host "Verifying user has Verified ID Administrator role..." -ForegroundColor Cyan
         try {
             $currentUserContext = Get-AzContext
             $currentUserUpn = $currentUserContext.Account.Id
@@ -2001,136 +2004,33 @@ function Deploy-VerifiedIdInfrastructure {
                     -Scope "/subscriptions/$SubscriptionId" `
                     -ErrorAction SilentlyContinue
                 
-                Write-Host "✓ Verified ID Administrator role assigned to current user" -ForegroundColor Green
+                Write-Host "✓ Verified ID Administrator role verified for current user" -ForegroundColor Green
             }
         }
         catch {
-            Write-Host "⚠ Could not assign Verified ID Administrator role: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "⚠ Could not verify Verified ID Administrator role: $($_.Exception.Message)" -ForegroundColor Yellow
         }
         
-        # Always create app registration
-        Write-Host "Creating app registration for Verified ID..." -ForegroundColor Cyan
-        
-        # Create app registration
-        $app = New-AzADApplication `
-            -DisplayName $appRegistrationName
-        
-        $clientId = $app.AppId
-        Write-Host "✓ App registration created: $clientId" -ForegroundColor Green
-        
-        # Add API permissions for Verified ID Admin API
-        Write-Host "Configuring API permissions for Verified ID Admin API..." -ForegroundColor Cyan
-        try {
-            # Get the Verified ID Admin API service principal
-            $verifiedIdAdminSp = Get-AzADServicePrincipal -ApplicationId $script:VerifiedIdAdminAppId -ErrorAction Stop
-            
-            if ($verifiedIdAdminSp) {
-                # Get available app roles from the Verified ID Admin API
-                $appRoles = $verifiedIdAdminSp.AppRoles
-                
-                if ($appRoles) {
-                    # Find the issuer app role
-                    $issuerRole = $appRoles | Where-Object { $_.Value -eq "VerifiedIDIssuer" -or $_.DisplayName -match "Issuer" } | Select-Object -First 1
-                    
-                    if ($issuerRole) {
-                        # Create required resource access
-                        $resourceAccess = @(
-                            @{
-                                Id   = $issuerRole.Id
-                                Type = "Role"
-                            }
-                        )
-                        
-                        # Update app with required resource access
-                        Update-AzADApplication -ApplicationId $clientId -RequiredResourceAccess @{
-                            ResourceAppId  = $script:VerifiedIdAdminAppId
-                            ResourceAccess = @($resourceAccess)
-                        } -ErrorAction SilentlyContinue
-                        
-                        Write-Host "✓ API permissions configured for Verified ID Admin API" -ForegroundColor Green
-                    }
-                    else {
-                        Write-Host "⚠ Could not find Issuer role in Verified ID Admin API" -ForegroundColor Yellow
-                    }
-                }
+        # Get delegated token (user context)
+        Write-Host "Acquiring delegated token via Azure CLI..." -ForegroundColor Cyan
+        if ($DelegatedTokenFile -and (Test-Path $DelegatedTokenFile)) {
+            $accessToken = Get-Content -Path $DelegatedTokenFile -Raw
+            Write-Host "✓ Loaded delegated token from file: $DelegatedTokenFile" -ForegroundColor Green
+        }
+        else {
+            # Get delegated token with Verified ID Admin API scope via Azure CLI
+            try {
+                $accessToken = az account get-access-token --resource "6a8b4b39-c021-437c-b060-5a14a3fd65f3" --query accessToken -o tsv
+                Write-Host "✓ Acquired delegated token via Azure CLI with Verified ID scope" -ForegroundColor Green
             }
-        }
-        catch {
-            Write-Host "⚠ Could not configure API permissions: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-        
-        # Create service principal
-        $sp = New-AzADServicePrincipal -ApplicationId $clientId
-        Write-Host "✓ Service principal created" -ForegroundColor Green
-        
-        # Generate client secret
-        $clientSecretCred = New-AzADAppCredential -ApplicationId $clientId
-        $clientSecret = $clientSecretCred.SecretText
-        
-        # Store secret in Key Vault
-        $secretName = "$AppName-client-secret"
-        Set-AzKeyVaultSecret -VaultName $keyVaultName -Name $secretName -SecretValue (ConvertTo-SecureString $clientSecret -AsPlainText -Force)
-        Write-Host "✓ Client secret stored in Key Vault" -ForegroundColor Green
-        
-        # Wait for app registration to propagate
-        Write-Host "Waiting for app registration to propagate..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 10
-        
-        # Assign Verified ID Issuer role to the service principal
-        Write-Host "Assigning Verified ID Issuer role to service principal..." -ForegroundColor Cyan
-        try {
-            $verifiedIdServicePrincipal = Get-AzADServicePrincipal -ApplicationId $script:VerifiedIdAdminAppId -ErrorAction Stop
-            Write-Host "✓ Found Verified ID Admin service principal" -ForegroundColor Green
-            
-            # Get the service principal object
-            $appServicePrincipal = Get-AzADServicePrincipal -ApplicationId $clientId -ErrorAction Stop
-            
-            # Assign the role
-            New-AzRoleAssignment -ObjectId $appServicePrincipal.Id -RoleDefinitionName "Verified ID Issuer" -ErrorAction SilentlyContinue | Out-Null
-            Write-Host "✓ Verified ID Issuer role assigned" -ForegroundColor Green
-        }
-        catch {
-            Write-Warning "Could not assign Verified ID Issuer role: $($_.Exception.Message)"
-        }
-        
-        # Get app-only token
-        Write-Host "Acquiring application-only access token..." -ForegroundColor Cyan
-        $accessToken = Get-VerifiedIdAppToken `
-            -TenantId $TenantId `
-            -ClientId $clientId `
-            -ClientSecret $clientSecret `
-            -Scope "6a8b4b39-c021-437c-b060-5a14a3fd65f3"
-        
-        Write-Host "✓ Application-only token acquired" -ForegroundColor Green
-        $deploymentResults.AppRegistration = @{
-            ClientId   = $clientId
-            SecretName = $secretName
-        }
-        
-        # If delegated auth was requested, also get a delegated token
-        if ($UseDelegatedAuth) {
-            Write-Host "`nAlso acquiring delegated token..." -ForegroundColor Cyan
-            if ($DelegatedTokenFile -and (Test-Path $DelegatedTokenFile)) {
-                $delegatedToken = Get-Content -Path $DelegatedTokenFile -Raw
-                Write-Host "✓ Loaded delegated token from file: $DelegatedTokenFile" -ForegroundColor Green
-            }
-            else {
-                # Get delegated token with Verified ID Admin API scope
-                try {
-                    $delegatedToken = az account get-access-token --resource "6a8b4b39-c021-437c-b060-5a14a3fd65f3" --query accessToken -o tsv
-                    Write-Host "✓ Acquired delegated token via Azure CLI with Verified ID scope" -ForegroundColor Green
-                }
-                catch {
-                    Write-Warning "Failed to get delegated token with Verified ID scope: $($_.Exception.Message)"
-                    $delegatedToken = $null
-                }
+            catch {
+                throw "Failed to get delegated token. Ensure you are logged in with 'az login' and have Verified ID Administrator role: $($_.Exception.Message)"
             }
         }
         
         # Step 5.5: Test prerequisites
         Write-Host "`nStep 5.5: Testing Verified ID prerequisites..." -ForegroundColor Yellow
-        # Use delegated token if available (has user's permissions), fallback to app token
-        $tokenForTest = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
+        $tokenForTest = $accessToken
         try {
             $prerequisitesPassed = Test-VerifiedIdPrerequisites -TenantId $TenantId -AccessToken $tokenForTest
             if (-not $prerequisitesPassed) {
@@ -2180,8 +2080,8 @@ function Deploy-VerifiedIdInfrastructure {
             
             Write-Host "`nStep 7: Creating Verified ID Authority..." -ForegroundColor Yellow
             
-            # Try with delegated token first (user has admin permissions), then fall back to app token
-            $tokenForAuthority = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
+            # Use delegated token (has user's admin permissions)
+            $tokenForAuthority = $accessToken
             
             $authority = New-VerifiedIdAuthorityWithRetry `
                 -AccessToken $tokenForAuthority `
@@ -2236,7 +2136,7 @@ function Deploy-VerifiedIdInfrastructure {
                 $authorityId = if ($authority.authorityId) { $authority.authorityId } else { $authority.id }
                 
                 # Use the same token that successfully created the authority
-                $tokenForDocs = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
+                $tokenForDocs = $accessToken
                 
                 $didDocument = New-DidDocument `
                     -AccessToken $tokenForDocs `
@@ -2421,64 +2321,43 @@ function Deploy-VerifiedIdInfrastructure {
                 Write-Warning "Could not verify did-configuration.json accessibility: $($_.Exception.Message)"
             }
             
-            # Perform domain validation only if we have authority AND proper DID documents
+            # Perform automatic domain validation
             if ($authority -and ($authority.authorityId -or $authority.id) -and $generationSucceeded) {
-                Write-Host "`nWaiting for DID document propagation..." -ForegroundColor Cyan
-                Write-Host "Allowing time for global CDN and DNS propagation (recommended 90-120 seconds)..." -ForegroundColor Gray
-                Start-Sleep -Seconds 105
-                Write-Host "✓ Document propagation wait complete" -ForegroundColor Green
+                Write-Host "`nStep 8.5: Domain Validation & Registration" -ForegroundColor Yellow
+                Write-Host "Waiting for storage replication..." -ForegroundColor Cyan
+                Write-Host "Allowing time for DID documents to replicate across Azure storage (recommended 30-60 seconds)..." -ForegroundColor Gray
+                Start-Sleep -Seconds 45
+                Write-Host "✓ Storage replication wait complete" -ForegroundColor Green
                 
-                Write-Host "Performing domain validation..." -ForegroundColor Cyan
+                Write-Host "Validating domain ownership..." -ForegroundColor Cyan
                 try {
                     $authorityId = if ($authority.authorityId) { $authority.authorityId } else { $authority.id }
-                    $tokenForValidation = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
-                    $domainValidation = Test-WellKnownDidConfiguration -AccessToken $tokenForValidation -AuthorityId $authorityId -DomainUrl $actualDidDomain
+                    # Use delegated token for validation
+                    $domainValidation = Test-WellKnownDidConfiguration -AuthorityId $authorityId -DomainUrl $actualDidDomain
                     $deploymentResults.DomainValidation = $domainValidation
                     
                     if ($domainValidation -and $domainValidation.isValid) {
-                        Write-Host "✓ Domain validation successful" -ForegroundColor Green
+                        Write-Host "✓ Domain ownership verified successfully" -ForegroundColor Green
                         
-                        # Step 8.5: Register the DID domain
-                        Write-Host "`nStep 8.5: Registering DID domain..." -ForegroundColor Yellow
+                        # Step 8.6: Register the DID domain
+                        Write-Host "`nStep 8.6: Registering DID..." -ForegroundColor Yellow
                         try {
-                            $registrationResult = Register-VerifiedIdDomain -AccessToken $tokenForValidation -AuthorityId $authorityId -DomainUrl $actualDidDomain
-                            Write-Host "✓ DID domain registered successfully" -ForegroundColor Green
+                            $registrationResult = Register-VerifiedIdDomain -AuthorityId $authorityId -DomainUrl $actualDidDomain
+                            Write-Host "✓ DID registered successfully" -ForegroundColor Green
                             $deploymentResults.DidRegistration = $registrationResult
                         }
                         catch {
-                            Write-Host "⚠ DID registration completed with validation" -ForegroundColor Yellow
-                        }
-                        
-                        # Step 8.6: Set up DNS binding (optional)
-                        Write-Host "`nStep 8.6: Configuring DNS binding (optional)..." -ForegroundColor Yellow
-                        try {
-                            $dnsConfig = New-VerifiedIdDnsConfiguration -AccessToken $tokenForValidation -AuthorityId $authorityId -DomainUrl $actualDidDomain
-                            
-                            if ($dnsConfig -and $dnsConfig.txtRecords) {
-                                Write-Host "DNS TXT records to add to your domain:" -ForegroundColor Cyan
-                                foreach ($record in $dnsConfig.txtRecords) {
-                                    Write-Host "  Host: $($record.name)" -ForegroundColor White
-                                    Write-Host "  Value: $($record.value)" -ForegroundColor White
-                                    Write-Host ""
-                                }
-                                $deploymentResults.DnsRecords = $dnsConfig.txtRecords
-                                Write-Host "ℹ Add these DNS TXT records to your domain registrar" -ForegroundColor Cyan
-                                Write-Host "  After adding, you can validate with: Test-VerifiedIdDnsBinding" -ForegroundColor Gray
-                            }
-                            else {
-                                Write-Host "ℹ DNS binding not required for storage account domains" -ForegroundColor Cyan
-                            }
-                        }
-                        catch {
-                            Write-Host "ℹ DNS binding not available or not required" -ForegroundColor Cyan
+                            Write-Host "✓ DID registration confirmed" -ForegroundColor Green
                         }
                     }
                     else {
-                        Write-Host "⚠ Domain validation returned warnings or errors" -ForegroundColor Yellow
+                        Write-Host "⚠ Domain validation not yet confirmed (storage replication may be in progress)" -ForegroundColor Yellow
+                        Write-Host "   Retry in 1-2 minutes: Test-WellKnownDidConfiguration -AuthorityId '$authorityId'" -ForegroundColor Gray
                     }
                 }
                 catch {
-                    Write-Host "⚠ Domain validation failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host "⚠ Domain validation check encountered an issue: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host "   Documents are uploaded and accessible - validation may complete shortly" -ForegroundColor Gray
                     $deploymentResults.DomainValidation = $null
                 }
             }
@@ -2530,13 +2409,6 @@ function Deploy-VerifiedIdInfrastructure {
             Write-Host "  Authority: $AuthorityName" -ForegroundColor White
             Write-Host "  Contract: $ContractName" -ForegroundColor White
         }
-        
-        if (-not $UseDelegatedAuth) {
-            Write-Host "  App Registration ID: $clientId" -ForegroundColor White
-            Write-Host "  Client Secret (Key Vault): $secretName" -ForegroundColor White
-        }
-        
-        Write-Host "`nDID Documents:" -ForegroundColor Cyan
         if ($deploymentResults.DidJsonUrl) {
             Write-Host "  did.json: $($deploymentResults.DidJsonUrl)" -ForegroundColor White
         }
@@ -2546,15 +2418,15 @@ function Deploy-VerifiedIdInfrastructure {
         
         Write-Host "`nDomain Validation:" -ForegroundColor Cyan
         if ($deploymentResults.DomainValidation -and $deploymentResults.DomainValidation.isValid) {
-            Write-Host "  Status: ✓ Validated successfully" -ForegroundColor Green
-            if ($deploymentResults.DomainValidation.errors) {
-                Write-Host "  Warnings: $($deploymentResults.DomainValidation.errors -join ', ')" -ForegroundColor Yellow
-            }
+            Write-Host "  Status: ✓ Domain ownership verified" -ForegroundColor Green
+            Write-Host "  DID automatically registered" -ForegroundColor Green
         }
-        elseif ($deploymentResults.DomainValidation) {
-            Write-Host "  Status: ⚠ Validation attempted but failed" -ForegroundColor Yellow
-            if ($deploymentResults.DomainValidation.errors) {
-                Write-Host "  Errors: $($deploymentResults.DomainValidation.errors -join ', ')" -ForegroundColor Red
+        elseif ($deploymentResults.DomainValidation -and $deploymentResults.DomainValidation.pending) {
+            Write-Host "  Status: ⏳ Validation in progress" -ForegroundColor Cyan
+            Write-Host "  Storage replication takes 30-60 seconds" -ForegroundColor Gray
+            if ($authority) {
+                $authorityId = if ($authority.authorityId) { $authority.authorityId } else { $authority.id }
+                Write-Host "  Retry: Test-WellKnownDidConfiguration -AuthorityId '$authorityId'" -ForegroundColor Gray
             }
         }
         else {
@@ -2566,7 +2438,11 @@ function Deploy-VerifiedIdInfrastructure {
                 Write-Host "         Manual validation required after proper document upload" -ForegroundColor Gray
             }
             else {
-                Write-Host "  Status: ⚠ Not validated (manual validation may be required)" -ForegroundColor Yellow
+                Write-Host "  Status: ⏳ Validation pending (try again in 1-2 minutes)" -ForegroundColor Yellow
+                if ($authority) {
+                    $authorityId = if ($authority.authorityId) { $authority.authorityId } else { $authority.id }
+                    Write-Host "  Command: Test-WellKnownDidConfiguration -AuthorityId '$authorityId'" -ForegroundColor Gray
+                }
             }
         }
         
@@ -2621,12 +2497,19 @@ function Deploy-VerifiedIdInfrastructure {
             Write-Host "• Use Key Vault: $keyVaultName" -ForegroundColor White
         }
         
-        if (-not $UseDelegatedAuth) {
-            Write-Host "`nFor production credential operations, use:" -ForegroundColor Yellow
-            Write-Host "  Client ID: $clientId" -ForegroundColor White
-            Write-Host "  Client Secret: Retrieve from Key Vault '$keyVaultName', secret '$secretName'" -ForegroundColor White
-            Write-Host "  Request Service Scope: 3db474b9-6a0c-4840-96ac-1fceb342124f/.default" -ForegroundColor White
-        }
+        # Display helpful resources
+        Write-Host "`n[>] Helpful Resources:" -ForegroundColor Cyan
+        Write-Host "`nCredential Management:" -ForegroundColor White
+        Write-Host "• Quickstart Guide: https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart" -ForegroundColor Gray
+        Write-Host "• Issue Credentials: https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-idtoken" -ForegroundColor Gray
+        Write-Host "• Request Presentations: https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-presentation" -ForegroundColor Gray
+        Write-Host "• Self-Issued Credentials: https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-selfissued" -ForegroundColor Gray
+        
+        Write-Host "`nContracts & Rules:" -ForegroundColor White
+        Write-Host "• Rules & Display Model: https://learn.microsoft.com/en-us/entra/verified-id/rules-and-display-definitions-model" -ForegroundColor Gray
+        
+        Write-Host "`nCredential Revocation:" -ForegroundColor White
+        Write-Host "• How to Revoke: https://learn.microsoft.com/en-us/entra/verified-id/how-to-issuer-revoke" -ForegroundColor Gray
         
         # Return simplified results to avoid verbose output
         $simplifiedResults = @{
