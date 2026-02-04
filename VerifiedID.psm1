@@ -1542,7 +1542,7 @@ function New-VerifiedIdAuthorityWithRetry {
             }
             else {
                 # Provide detailed troubleshooting on final failure
-                Write-Host "`n🔍 Authority Creation Troubleshooting:" -ForegroundColor Red
+                Write-Host "`n[INFO] Authority Creation Troubleshooting:" -ForegroundColor Red
                 Write-Host "• Verify you have 'Verified ID Administrator' role" -ForegroundColor White
                 Write-Host "• Check if Verified ID is enabled in your tenant" -ForegroundColor White
                 Write-Host "• Ensure the domain is accessible: $DidDomain" -ForegroundColor White
@@ -1851,7 +1851,7 @@ function Deploy-VerifiedIdInfrastructure {
         Write-Host "  Key Vault: $keyVaultName" -ForegroundColor White
         Write-Host "  Authentication Mode: $(if ($UseDelegatedAuth) { 'Delegated' } else { 'Application-Only' })" -ForegroundColor White
         
-        Write-Host "`n⏱️  Expected deployment time: 4-6 minutes" -ForegroundColor Cyan
+        Write-Host "`n[TIME] Expected deployment time: 4-6 minutes" -ForegroundColor Cyan
         Write-Host "   (Includes strategic wait periods for Azure propagation)" -ForegroundColor Gray
         
         # Step 1: Connect to Azure
@@ -2134,11 +2134,11 @@ function Deploy-VerifiedIdInfrastructure {
         try {
             $prerequisitesPassed = Test-VerifiedIdPrerequisites -TenantId $TenantId -AccessToken $tokenForTest
             if (-not $prerequisitesPassed) {
-                Write-Host "`n⚠️ Prerequisites check found issues, but continuing with deployment..." -ForegroundColor Yellow
+                Write-Host "`n[WARNING] Prerequisites check found issues, but continuing with deployment..." -ForegroundColor Yellow
             }
         }
         catch {
-            Write-Host "`n⚠️ Prerequisites check had errors, but continuing with deployment..." -ForegroundColor Yellow
+            Write-Host "`n[WARNING] Prerequisites check had errors, but continuing with deployment..." -ForegroundColor Yellow
             Write-Host "   Error: $($_.Exception.Message)" -ForegroundColor Gray
         }
         
@@ -2199,7 +2199,7 @@ function Deploy-VerifiedIdInfrastructure {
             
             # Step 7b: Contract Creation Note
             Write-Host "`nStep 7b: Contract Creation" -ForegroundColor Yellow
-            Write-Host "📝 Contracts should be created manually after Verified ID is provisioned" -ForegroundColor Cyan
+            Write-Host "[NOTE] Contracts should be created manually after Verified ID is provisioned" -ForegroundColor Cyan
             Write-Host "   This allows you to customize claims, display properties, and rules" -ForegroundColor Gray
             Write-Host "   Use: New-VerifiedIdContract or create via Azure Portal" -ForegroundColor Gray
             
@@ -2513,7 +2513,7 @@ function Deploy-VerifiedIdInfrastructure {
             Write-Host "You will need to manually upload them to your domain." -ForegroundColor Yellow
         }
         
-        Write-Host "`n✅ Infrastructure deployment completed!" -ForegroundColor Green
+        Write-Host "`n[SUCCESS] Infrastructure deployment completed!" -ForegroundColor Green
         
         # Step 8: Create deployment summary
         Write-Host "`n=============================================" -ForegroundColor Green
@@ -2895,7 +2895,7 @@ function Test-VerifiedIdPrerequisites {
     
     # Summary
     if ($issues.Count -eq 0) {
-        Write-Host "`n✅ All prerequisites passed!" -ForegroundColor Green
+        Write-Host "`n[SUCCESS] All prerequisites passed!" -ForegroundColor Green
         return $true
     }
     else {
@@ -2904,7 +2904,7 @@ function Test-VerifiedIdPrerequisites {
             Write-Host "   - $issue" -ForegroundColor Red
         }
         
-        Write-Host "`n🔧 Troubleshooting Steps:" -ForegroundColor Yellow
+        Write-Host "`n[TROUBLESHOOTING] Troubleshooting Steps:" -ForegroundColor Yellow
         Write-Host "   1. Ensure tenant is onboarded to Verified ID:" -ForegroundColor White
         Write-Host "      - Go to Azure portal > Azure AD > Verifiable Credentials" -ForegroundColor Gray
         Write-Host "      - Complete the onboarding process" -ForegroundColor Gray
@@ -3105,7 +3105,7 @@ function Connect-VerifiedIdAzure {
         }
 
         # Success summary
-        Write-Host "`n✅ Setup completed successfully!" -ForegroundColor Green
+        Write-Host "`n[SUCCESS] Setup completed successfully!" -ForegroundColor Green
         Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
         Write-Host "Tenant ID: $TenantId" -ForegroundColor White
         Write-Host "Token File: $TokenFile" -ForegroundColor White
@@ -3125,7 +3125,7 @@ function Connect-VerifiedIdAzure {
         Write-Host "`n❌ Setup failed!" -ForegroundColor Red
         Write-Error "Failed to connect to Azure or acquire token: $($_.Exception.Message)"
         
-        Write-Host "`n💡 Troubleshooting steps:" -ForegroundColor Yellow
+        Write-Host "`n[TIP] Troubleshooting steps:" -ForegroundColor Yellow
         Write-Host "1. Ensure Azure CLI is installed: https://docs.microsoft.com/cli/azure/install-azure-cli" -ForegroundColor Gray
         Write-Host "2. Check you have Verified ID Administrator role in the tenant" -ForegroundColor Gray
         Write-Host "3. Verify the tenant ID is correct" -ForegroundColor Gray
@@ -3232,11 +3232,11 @@ function Remove-VerifiedIdInfrastructure {
                     }
                     
                     Write-Host "" 
-                    Write-Host "📋 VERIFIED ID AUTHORITY REMOVAL REQUIRED:" -ForegroundColor Yellow
+                    Write-Host "[INFO] VERIFIED ID AUTHORITY REMOVAL REQUIRED:" -ForegroundColor Yellow
                     Write-Host "  Verified ID authorities cannot be removed with delegated tokens." -ForegroundColor White
                     Write-Host "  Choose one of these options:" -ForegroundColor White
                     Write-Host ""
-                    Write-Host "  🔧 OPTION 1 - Use App Registration:" -ForegroundColor Cyan
+                    Write-Host "  [OPTION] OPTION 1 - Use App Registration:" -ForegroundColor Cyan
                     Write-Host "    1. Create app registration with Verified ID Administrator role" -ForegroundColor White
                     Write-Host "    2. Use client credentials flow (not delegated)" -ForegroundColor White
                     Write-Host "    3. Run removal with app credentials token" -ForegroundColor White
@@ -3314,10 +3314,10 @@ function Remove-VerifiedIdInfrastructure {
         } while ($rg)
         
         Write-Host ""
-        Write-Host "✅ Resource group '$ResourceGroupName' and all resources have been deleted!" -ForegroundColor Green
+        Write-Host "[SUCCESS] Resource group '$ResourceGroupName' and all resources have been deleted!" -ForegroundColor Green
         
         # Optional cleanup of local files
-        Write-Host "`n📁 Cleaning up local files..." -ForegroundColor Cyan
+        Write-Host "`n[FILES] Cleaning up local files..." -ForegroundColor Cyan
         if (Test-Path ".well-known") {
             Remove-Item -Path ".well-known" -Recurse -Force -ErrorAction SilentlyContinue
             Write-Host "✓ Removed local .well-known directory" -ForegroundColor Green
@@ -3331,7 +3331,7 @@ function Remove-VerifiedIdInfrastructure {
     }
     catch {
         Write-Error "Cleanup failed: $($_.Exception.Message)"
-        Write-Host "`n💡 Alternative cleanup methods:" -ForegroundColor Yellow
+        Write-Host "`n[TIP] Alternative cleanup methods:" -ForegroundColor Yellow
         Write-Host "1. Azure Portal: Go to Resource Groups > '$ResourceGroupName' > Delete" -ForegroundColor Gray
         Write-Host "2. Azure CLI: az group delete --name '$ResourceGroupName' --yes" -ForegroundColor Gray
         Write-Host "3. PowerShell: Remove-AzResourceGroup -Name '$ResourceGroupName' -Force" -ForegroundColor Gray

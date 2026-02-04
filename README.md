@@ -2,7 +2,7 @@
 
 A comprehensive PowerShell module for deploying and managing Microsoft Entra Verified ID infrastructure, including Azure resources, authorities, contracts, and credential operations.
 
-## 🚀 Features
+## [→] Features
 
 ### Complete Infrastructure Deployment
 - **Azure Resource Group** creation and management
@@ -27,7 +27,7 @@ A comprehensive PowerShell module for deploying and managing Microsoft Entra Ver
 - **Comprehensive Cleanup**: Complete infrastructure removal capabilities
 - **Error Handling**: Detailed error reporting and recovery suggestions
 
-## 🎯 What Gets Automated
+## [✓] What Gets Automated
 
 The `Deploy-VerifiedIdInfrastructure` function fully automates all the manual steps from the Azure Portal setup wizard:
 
@@ -44,7 +44,7 @@ The `Deploy-VerifiedIdInfrastructure` function fully automates all the manual st
 
 **Result**: All three setup checkmarks in Azure Portal ✅ automatically completed on first run!
 
-## 📋 Prerequisites
+## [i] Prerequisites
 
 ### PowerShell Requirements
 - **PowerShell 7.0+** (PowerShell Core)
@@ -62,7 +62,7 @@ For production deployments, the service principal needs:
 - `VerifiedId.Authority.ReadWrite.All` (Microsoft Graph)
 - Contributor role on the Azure subscription or resource group
 
-## 🔧 Installation
+## [⚙] Installation
 
 ### 1. Install Prerequisites
 ```powershell
@@ -86,7 +86,7 @@ Get-Module VerifiedID
 Get-Command -Module VerifiedID
 ```
 
-## 🚀 Quick Start
+## [>] Quick Start
 
 ### Basic Deployment (Delegated Auth)
 ```powershell
@@ -128,7 +128,7 @@ $infra = Deploy-VerifiedIdInfrastructureOnly `
     -Prefix "myorg"
 ```
 
-## ⏱️ Timing Expectations
+## [⏱] Timing Expectations
 
 **Complete Deployment**: 4-6 minutes (fully automated)
 - Infrastructure creation: ~30 seconds
@@ -142,7 +142,7 @@ $infra = Deploy-VerifiedIdInfrastructureOnly `
 
 The module includes strategic wait periods to handle Azure propagation delays, ensuring reliable deployment on the first run. **Upon completion, your Verified ID is fully set up and ready to use** - no additional portal steps required.
 
-## 🔐 Authentication Modes
+## [*] Authentication Modes
 
 ### Delegated Authentication (`-UseDelegatedAuth`)
 - Uses your current user credentials
@@ -156,7 +156,7 @@ The module includes strategic wait periods to handle Azure propagation delays, e
 - Requires: Sufficient permissions to create app registrations
 - Benefits: Full programmatic control, can remove authorities
 
-## 📚 Core Functions
+## [*] Core Functions
 
 ### Deployment Functions
 - `Deploy-VerifiedIdInfrastructure` - Complete infrastructure + Verified ID setup
@@ -199,7 +199,7 @@ The module includes strategic wait periods to handle Azure propagation delays, e
 - `Get-VerifiedIdAuthority` - List authorities
 - `Get-VerifiedIdAuthorityDetail` - Get detailed authority information
 
-## 📁 Module Structure
+## [📂] Module Structure
 
 ```
 VerifiedID_Module/
@@ -209,7 +209,7 @@ VerifiedID_Module/
 └── Module_README.md         # This documentation
 ```
 
-## 🔧 Configuration Options
+## [⚙] Configuration Options
 
 ### Resource Naming
 - `Prefix` - Prefix for all resources (default: auto-generated)
@@ -227,7 +227,7 @@ VerifiedID_Module/
 - Automatic DID document generation and hosting
 - Automatic domain validation and DID registration
 
-## 📋 Deployment Workflow Details
+## [*] Deployment Workflow Details
 
 ### Step-by-Step Automation
 
@@ -263,7 +263,7 @@ VerifiedID_Module/
 
 All manual Portal setup steps are now automated!
 
-## 🛠️ Advanced Usage
+## [*] Advanced Usage
 
 ### Custom Contract Creation
 ```powershell
@@ -305,7 +305,7 @@ $presentation = Start-VcPresentation `
     -ValidateLinkedDomain
 ```
 
-## 🔍 Troubleshooting
+## [?] Troubleshooting
 
 ### Common Issues and Solutions
 
@@ -346,7 +346,7 @@ $DebugPreference = "Continue"
 Deploy-VerifiedIdInfrastructure -Verbose -Debug
 ```
 
-## 📊 Monitoring and Validation
+## [>] Monitoring and Validation
 
 ### Deployment Validation
 ```powershell
@@ -369,7 +369,7 @@ Invoke-WebRequest "$storageUrl/.well-known/did.json"
 Invoke-WebRequest "$storageUrl/.well-known/did-configuration.json"
 ```
 
-## 🔒 Security Best Practices
+## [*] Security Best Practices
 
 ### Production Recommendations
 1. **Use Application Authentication** for automated scenarios
@@ -385,7 +385,7 @@ Invoke-WebRequest "$storageUrl/.well-known/did-configuration.json"
 - Storage accounts use RBAC where possible
 - App registrations follow principle of least privilege
 
-## 📈 Scaling Considerations
+## [~] Scaling Considerations
 
 ### Multiple Authorities
 - Each authority should have its own domain
@@ -402,7 +402,7 @@ Invoke-WebRequest "$storageUrl/.well-known/did-configuration.json"
 - Consider Azure Front Door for custom domains
 - Monitor credential issuance volumes
 
-## 🤝 Contributing
+## [*] Contributing
 
 ### Development Setup
 1. Clone or download the module
@@ -420,18 +420,18 @@ New-DidDocument -AccessToken $token -AuthorityId $authId -DomainUrl "https://tes
 Deploy-VerifiedIdInfrastructure -ResourceGroupName "test-rg" -WhatIf
 ```
 
-## 📝 License
+## [i] License
 
 This project follows Microsoft's open source guidelines. See individual file headers for specific license information.
 
-## 🔗 References
+## [>] References
 
 - [Microsoft Entra Verified ID Documentation](https://docs.microsoft.com/en-us/azure/active-directory/verifiable-credentials/)
 - [Verified ID Admin API Reference](https://docs.microsoft.com/en-us/graph/api/resources/verifiablecredentials-overview)
 - [Azure PowerShell Documentation](https://docs.microsoft.com/en-us/powershell/azure/)
 - [DID Specification](https://www.w3.org/TR/did-core/)
 
-## 📞 Support
+## [*] Support
 
 For issues and questions:
 1. Review the troubleshooting section
