@@ -3251,3 +3251,8 @@ Export-ModuleMember -Function @(
     'Connect-VerifiedIdAzure',
     'Invoke-VerifiedIdApi'
 )
+
+#========================
+# Module Footer
+#========================
+Write-Host "Fortytwo.io protecting your Identities across the universe!" -ForegroundColor Cyan
