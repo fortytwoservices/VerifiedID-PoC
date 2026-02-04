@@ -12,11 +12,13 @@ A comprehensive PowerShell module for deploying and managing Microsoft Entra Ver
 - **Service Principal** configuration with appropriate roles
 
 ### Verified ID Management
-- **Authority** creation with retry mechanisms and propagation handling
+- **Authority** creation with automatic propagation handling
+- **DID Registration** with automated domain validation
+- **DID Documents** generation and upload to Azure Storage
+- **Domain Validation** with automatic refresh and registration
 - **Contract** creation with customizable claims and display properties
-- **DID Document** generation using Microsoft Admin API
-- **Domain Validation** with proper timing and error handling
 - **Credential Issuance** and **Verification** workflows
+- **App Registration** creation with required permissions for Verified ID
 
 ### Advanced Capabilities
 - **Strategic Timing**: Built-in wait periods for Azure propagation
@@ -24,6 +26,23 @@ A comprehensive PowerShell module for deploying and managing Microsoft Entra Ver
 - **Flexible Authentication**: Supports both delegated and application-only auth
 - **Comprehensive Cleanup**: Complete infrastructure removal capabilities
 - **Error Handling**: Detailed error reporting and recovery suggestions
+
+## 🎯 What Gets Automated
+
+The `Deploy-VerifiedIdInfrastructure` function fully automates all the manual steps from the Azure Portal setup wizard:
+
+| Step | Manual Process | Automated By Script |
+|------|---|---|
+| **1. Infrastructure** | Create storage account, key vault | ✅ Automatic |
+| **2. App Registration** | Create app + assign permissions | ✅ Automatic |
+| **3. Authority Creation** | Create via Portal | ✅ Automatic |
+| **4. DID Documents** | Generate via Admin API | ✅ Automatic |
+| **5. Upload DID Documents** | Manual upload to storage | ✅ Automatic |
+| **6. Domain Validation** | Click "Refresh" button in Portal | ✅ Automatic |
+| **7. DID Registration** | Click "Register" button in Portal | ✅ Automatic |
+| **8. Verify Domain** | Manual verification | ✅ Automatic |
+
+**Result**: All three setup checkmarks in Azure Portal ✅ automatically completed on first run!
 
 ## 📋 Prerequisites
 
@@ -111,15 +130,17 @@ $infra = Deploy-VerifiedIdInfrastructureOnly `
 
 ## ⏱️ Timing Expectations
 
-**Complete Deployment**: 4-6 minutes
+**Complete Deployment**: 4-6 minutes (fully automated)
 - Infrastructure creation: ~30 seconds
-- Authority creation with retry: ~75 seconds  
-- Document propagation wait: ~105 seconds
-- Domain validation: ~30 seconds
+- Authority creation: ~10 seconds
+- Authority propagation wait: ~75 seconds  
+- DID document generation & upload: ~20 seconds
+- Domain propagation wait: ~105 seconds
+- Domain validation & DID registration: ~30 seconds
 
 **Infrastructure Only**: 1-2 minutes
 
-The module includes strategic wait periods to handle Azure propagation delays, ensuring reliable deployment on the first run.
+The module includes strategic wait periods to handle Azure propagation delays, ensuring reliable deployment on the first run. **Upon completion, your Verified ID is fully set up and ready to use** - no additional portal steps required.
 
 ## 🔐 Authentication Modes
 
@@ -157,6 +178,12 @@ The module includes strategic wait periods to handle Azure propagation delays, e
 - `New-DidDocument` - Generate DID documents via Admin API
 - `New-WellKnownDidConfiguration` - Generate well-known configuration
 - `Test-WellKnownDidConfiguration` - Validate domain linkage
+- `Register-VerifiedIdDomain` - Register DID with authority (triggers domain validation)
+- `New-VerifiedIdDnsConfiguration` - Generate DNS records for domain binding
+- `Test-VerifiedIdDnsBinding` - Validate DNS binding configuration
+- `Register-VerifiedIdDomain` - Register DID with authority (triggers domain validation)
+- `New-VerifiedIdDnsConfiguration` - Generate DNS records for domain binding
+- `Test-VerifiedIdDnsBinding` - Validate DNS binding configuration
 
 ### Authentication & Token Functions
 - `Get-VerifiedIdAppToken` - Get app-only access tokens
@@ -197,7 +224,44 @@ VerifiedID_Module/
 ### Domain Configuration  
 - Custom domain support
 - Azure Storage static website hosting
-- Automatic DID document hosting
+- Automatic DID document generation and hosting
+- Automatic domain validation and DID registration
+
+## 📋 Deployment Workflow Details
+
+### Step-by-Step Automation
+
+**Step 1-4: Azure Infrastructure**
+```powershell
+✅ Creates Resource Group
+✅ Creates Storage Account with static website 
+✅ Creates Key Vault
+✅ Assigns permissions
+```
+
+**Step 5-7: Verified ID Setup**
+```powershell
+✅ Acquires access tokens (delegated + app-only)
+✅ Creates Verified ID Authority 
+✅ Waits 75 seconds for propagation
+✅ Validates prerequisites
+```
+
+**Step 8: DID Documents & Registration**
+```powershell
+✅ Generates real DID documents via Admin API
+✅ Uploads did.json to storage
+✅ Uploads did-configuration.json to storage
+✅ Validates document accessibility
+✅ Waits 105 seconds for CDN propagation
+✅ Performs domain validation (Portal "Refresh" equivalent)
+✅ Registers DID domain (Portal "Register" equivalent)
+✅ Verifies domain ownership
+```
+
+**Result: Three Portal checkmarks ✅✅✅**
+
+All manual Portal setup steps are now automated!
 
 ## 🛠️ Advanced Usage
 

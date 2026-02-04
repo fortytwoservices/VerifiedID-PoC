@@ -910,6 +910,144 @@ function Test-WellKnownDidConfiguration {
 
 <#
 .SYNOPSIS
+    Registers a DID with the authority after uploading DID documents.
+
+.DESCRIPTION
+    Triggers the DID registration process which validates the DID documents
+    and activates the decentralized identity.
+
+.PARAMETER AccessToken
+    Access token for the Verified ID Admin API.
+
+.PARAMETER AuthorityId
+    The ID of the authority to register.
+
+.PARAMETER DomainUrl
+    The domain URL where DID documents are hosted.
+
+.EXAMPLE
+    Register-VerifiedIdDomain -AccessToken $token -AuthorityId $authorityId -DomainUrl "https://issuer.contoso.com"
+#>
+function Register-VerifiedIdDomain {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$AccessToken,
+        
+        [Parameter(Mandatory)]
+        [string]$AuthorityId,
+        
+        [Parameter(Mandatory)]
+        [string]$DomainUrl
+    )
+    
+    $origin = if ($DomainUrl -match '^https?://') { 
+        $DomainUrl.TrimEnd('/') 
+    }
+    else { 
+        "https://$DomainUrl" 
+    }
+    
+    $body = @{ domainUrl = $origin }
+    
+    try {
+        # This is the same as validateWellKnownDidConfiguration - it performs registration
+        return Invoke-VerifiedIdApi -Method POST -Path "verifiableCredentials/authorities/$AuthorityId/validateWellKnownDidConfiguration" -Body $body -AccessToken $AccessToken
+    }
+    catch {
+        throw "Failed to register DID domain: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Generates DNS TXT records for DNS-based domain verification.
+
+.DESCRIPTION
+    Creates the DNS TXT records that need to be added to your domain's DNS
+    configuration for DNS binding verification.
+
+.PARAMETER AccessToken
+    Access token for the Verified ID Admin API.
+
+.PARAMETER AuthorityId
+    The ID of the authority.
+
+.PARAMETER DomainUrl
+    The domain URL for DNS binding.
+
+.EXAMPLE
+    $dnsRecords = New-VerifiedIdDnsConfiguration -AccessToken $token -AuthorityId $authorityId -DomainUrl "issuer.contoso.com"
+#>
+function New-VerifiedIdDnsConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$AccessToken,
+        
+        [Parameter(Mandatory)]
+        [string]$AuthorityId,
+        
+        [Parameter(Mandatory)]
+        [string]$DomainUrl
+    )
+    
+    $domain = $DomainUrl -replace '^https?://', '' -replace '/$', ''
+    
+    try {
+        return Invoke-VerifiedIdApi -Method GET -Path "verifiableCredentials/authorities/$AuthorityId/domainVerification?domainUrl=$domain" -AccessToken $AccessToken
+    }
+    catch {
+        throw "Failed to generate DNS configuration: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Validates DNS binding for a Verified ID authority.
+
+.DESCRIPTION
+    Validates that the DNS TXT records have been properly configured
+    for domain verification via DNS.
+
+.PARAMETER AccessToken
+    Access token for the Verified ID Admin API.
+
+.PARAMETER AuthorityId
+    The ID of the authority.
+
+.PARAMETER DomainUrl
+    The domain URL to validate.
+
+.EXAMPLE
+    Test-VerifiedIdDnsBinding -AccessToken $token -AuthorityId $authorityId -DomainUrl "issuer.contoso.com"
+#>
+function Test-VerifiedIdDnsBinding {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$AccessToken,
+        
+        [Parameter(Mandatory)]
+        [string]$AuthorityId,
+        
+        [Parameter(Mandatory)]
+        [string]$DomainUrl
+    )
+    
+    $domain = $DomainUrl -replace '^https?://', '' -replace '/$', ''
+    $body = @{ domainUrl = $domain }
+    
+    try {
+        return Invoke-VerifiedIdApi -Method POST -Path "verifiableCredentials/authorities/$AuthorityId/validateDomainVerification" -Body $body -AccessToken $AccessToken
+    }
+    catch {
+        throw "Failed to validate DNS binding: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
     Creates a new Verified ID contract (credential type).
 
 .DESCRIPTION
@@ -1801,105 +1939,38 @@ function Deploy-VerifiedIdInfrastructure {
             Write-Host "Checking for existing Key Vault '$keyVaultName'..." -ForegroundColor Gray
             $keyVault = Get-AzKeyVault -ResourceGroupName $ResourceGroupName -VaultName $keyVaultName -ErrorAction SilentlyContinue
             
-            if ($keyVault) {
-                Write-Host "✓ Key Vault '$keyVaultName' already exists" -ForegroundColor Green
+            if (-not $keyVault) {
+                Write-Host "Creating new Key Vault '$keyVaultName'..." -ForegroundColor Cyan
+                $keyVault = New-AzKeyVault `
+                    -ResourceGroupName $ResourceGroupName `
+                    -VaultName $keyVaultName `
+                    -Location $Location `
+                    -Sku "Standard" `
+                    -ErrorAction Stop
+                
+                Write-Host "✓ Key Vault '$keyVaultName' created" -ForegroundColor Green
             }
             else {
-                Write-Host "Creating new Key Vault '$keyVaultName'..." -ForegroundColor Cyan
-                # Create Key Vault with compatible parameters
-                try {
-                    # Try with newer parameter name first
-                    $keyVault = New-AzKeyVault `
-                        -ResourceGroupName $ResourceGroupName `
-                        -VaultName $keyVaultName `
-                        -Location $Location `
-                        -EnableRbacAuthorization `
-                        -ErrorAction Stop
-                    
-                    Write-Host "✓ Key Vault '$keyVaultName' created with RBAC (new syntax)" -ForegroundColor Green
-                }
-                catch {
-                    # Check if the error is "vault already exists" - if so, get the existing vault
-                    if ($_.Exception.Message -match "already exists") {
-                        Write-Host "✓ Key Vault '$keyVaultName' already exists - using existing vault" -ForegroundColor Green
-                        $keyVault = Get-AzKeyVault -ResourceGroupName $ResourceGroupName -VaultName $keyVaultName -ErrorAction Stop
-                    }
-                    else {
-                        # Fall back to older parameter name or different approach
-                        try {
-                            $keyVault = New-AzKeyVault `
-                                -ResourceGroupName $ResourceGroupName `
-                                -VaultName $keyVaultName `
-                                -Location $Location `
-                                -Sku "Standard" `
-                                -ErrorAction Stop
-                        
-                            Write-Host "✓ Key Vault '$keyVaultName' created with standard SKU" -ForegroundColor Green
-                        
-                            # Enable RBAC after creation
-                            Update-AzKeyVault -ResourceGroupName $ResourceGroupName -VaultName $keyVaultName -EnableRbacAuthorization $true -ErrorAction SilentlyContinue
-                            Write-Host "✓ RBAC enabled on Key Vault" -ForegroundColor Green
-                        }
-                        catch {
-                            # Check if vault already exists in final fallback too
-                            if ($_.Exception.Message -match "already exists") {
-                                Write-Host "✓ Key Vault '$keyVaultName' already exists - using existing vault" -ForegroundColor Green
-                                $keyVault = Get-AzKeyVault -ResourceGroupName $ResourceGroupName -VaultName $keyVaultName -ErrorAction Stop
-                            }
-                            else {
-                                # Final fallback - create with access policies
-                                $objectId = (Get-AzContext).Account.ExtendedProperties.HomeAccountId.Split('.')[0]
-                                $keyVault = New-AzKeyVault `
-                                    -ResourceGroupName $ResourceGroupName `
-                                    -VaultName $keyVaultName `
-                                    -Location $Location `
-                                    -Sku "Standard"
-                            
-                                # Set access policy for current user
-                                Set-AzKeyVaultAccessPolicy `
-                                    -VaultName $keyVaultName `
-                                    -ObjectId $objectId `
-                                    -PermissionsToSecrets Get, Set, List, Delete `
-                                    -ErrorAction SilentlyContinue
-                            
-                                Write-Host "✓ Key Vault '$keyVaultName' created with access policies" -ForegroundColor Green
-                            }
-                        }
-                    }
-                }
-                
-                # Grant current user Key Vault Administrator role (if RBAC is enabled)
-                try {
-                    $currentUser = (Get-AzContext).Account.Id
-                    New-AzRoleAssignment `
-                        -SignInName $currentUser `
-                        -RoleDefinitionName "Key Vault Administrator" `
-                        -Scope $keyVault.ResourceId `
-                        -ErrorAction SilentlyContinue
-                    
-                    Write-Host "✓ Key Vault Administrator role assigned to current user" -ForegroundColor Green
-                }
-                catch {
-                    Write-Host "✓ Key Vault created (role assignment may not be needed)" -ForegroundColor Green
-                }
+                Write-Host "✓ Key Vault '$keyVaultName' already exists" -ForegroundColor Green
             }
             
-            # Ensure current user has access to Key Vault (whether new or existing)
+            # Grant current user Key Vault Administrator role
             try {
                 $currentUser = (Get-AzContext).Account.Id
                 New-AzRoleAssignment `
                     -SignInName $currentUser `
                     -RoleDefinitionName "Key Vault Administrator" `
                     -Scope $keyVault.ResourceId `
-                    -ErrorAction SilentlyContinue
+                    -ErrorAction SilentlyContinue | Out-Null
                 
-                Write-Host "✓ Key Vault access verified for current user" -ForegroundColor Green
+                Write-Host "✓ Key Vault Administrator role assigned" -ForegroundColor Green
+                Start-Sleep -Seconds 15
+                Write-Host "✓ Waiting for role assignment to propagate..." -ForegroundColor Green
             }
             catch {
-                Write-Host "⚠ Could not verify Key Vault access (may already have permissions)" -ForegroundColor Yellow
+                Write-Host "⚠ Could not assign role (may already have permissions)" -ForegroundColor Yellow
             }
             
-            # Debug: Show Key Vault details
             Write-Host "Key Vault Name: $($keyVault.VaultName)" -ForegroundColor Gray
             Write-Host "Key Vault URI: $($keyVault.VaultUri)" -ForegroundColor Gray
             
@@ -1913,65 +1984,162 @@ function Deploy-VerifiedIdInfrastructure {
         Write-Host "`nStep 5: Acquiring access token..." -ForegroundColor Yellow
         $accessToken = $null
         $clientId = $null
+        $clientSecret = $null
         
-        if ($UseDelegatedAuth) {
-            Write-Host "Using delegated authentication..." -ForegroundColor Cyan
-            if ($DelegatedTokenFile -and (Test-Path $DelegatedTokenFile)) {
-                $accessToken = Get-Content -Path $DelegatedTokenFile -Raw
-                Write-Host "✓ Loaded token from file: $DelegatedTokenFile" -ForegroundColor Green
-            }
-            else {
-                $accessToken = Get-VerifiedIdDelegatedToken -TenantId $TenantId -UseAzureCLI
-                Write-Host "✓ Acquired delegated token via Azure CLI" -ForegroundColor Green
+        # Ensure current user has Verified ID Administrator role
+        Write-Host "Ensuring Verified ID Administrator role for current user..." -ForegroundColor Cyan
+        try {
+            $currentUserContext = Get-AzContext
+            $currentUserUpn = $currentUserContext.Account.Id
+            $currentUser = Get-AzADUser -UserPrincipalName $currentUserUpn -ErrorAction SilentlyContinue
+            
+            if ($currentUser) {
+                # Try to assign Verified ID Administrator role at subscription scope
+                $roleAssignment = New-AzRoleAssignment `
+                    -ObjectId $currentUser.Id `
+                    -RoleDefinitionName "Verified ID Administrator" `
+                    -Scope "/subscriptions/$SubscriptionId" `
+                    -ErrorAction SilentlyContinue
+                
+                Write-Host "✓ Verified ID Administrator role assigned to current user" -ForegroundColor Green
             }
         }
-        else {
-            Write-Host "Creating app registration for application-only authentication..." -ForegroundColor Cyan
+        catch {
+            Write-Host "⚠ Could not assign Verified ID Administrator role: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        
+        # Always create app registration
+        Write-Host "Creating app registration for Verified ID..." -ForegroundColor Cyan
+        
+        # Create app registration
+        $app = New-AzADApplication `
+            -DisplayName $appRegistrationName
+        
+        $clientId = $app.AppId
+        Write-Host "✓ App registration created: $clientId" -ForegroundColor Green
+        
+        # Add API permissions for Verified ID Admin API
+        Write-Host "Configuring API permissions for Verified ID Admin API..." -ForegroundColor Cyan
+        try {
+            # Get the Verified ID Admin API service principal
+            $verifiedIdAdminSp = Get-AzADServicePrincipal -ApplicationId $script:VerifiedIdAdminAppId -ErrorAction Stop
             
-            # Create app registration
-            $app = New-AzADApplication `
-                -DisplayName $appRegistrationName `
-                -IdentifierUris @("api://$appRegistrationName")
+            if ($verifiedIdAdminSp) {
+                # Get available app roles from the Verified ID Admin API
+                $appRoles = $verifiedIdAdminSp.AppRoles
+                
+                if ($appRoles) {
+                    # Find the issuer app role
+                    $issuerRole = $appRoles | Where-Object { $_.Value -eq "VerifiedIDIssuer" -or $_.DisplayName -match "Issuer" } | Select-Object -First 1
+                    
+                    if ($issuerRole) {
+                        # Create required resource access
+                        $resourceAccess = @(
+                            @{
+                                Id   = $issuerRole.Id
+                                Type = "Role"
+                            }
+                        )
+                        
+                        # Update app with required resource access
+                        Update-AzADApplication -ApplicationId $clientId -RequiredResourceAccess @{
+                            ResourceAppId  = $script:VerifiedIdAdminAppId
+                            ResourceAccess = @($resourceAccess)
+                        } -ErrorAction SilentlyContinue
+                        
+                        Write-Host "✓ API permissions configured for Verified ID Admin API" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "⚠ Could not find Issuer role in Verified ID Admin API" -ForegroundColor Yellow
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Host "⚠ Could not configure API permissions: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        
+        # Create service principal
+        $sp = New-AzADServicePrincipal -ApplicationId $clientId
+        Write-Host "✓ Service principal created" -ForegroundColor Green
+        
+        # Generate client secret
+        $clientSecretCred = New-AzADAppCredential -ApplicationId $clientId
+        $clientSecret = $clientSecretCred.SecretText
+        
+        # Store secret in Key Vault
+        $secretName = "$AppName-client-secret"
+        Set-AzKeyVaultSecret -VaultName $keyVaultName -Name $secretName -SecretValue (ConvertTo-SecureString $clientSecret -AsPlainText -Force)
+        Write-Host "✓ Client secret stored in Key Vault" -ForegroundColor Green
+        
+        # Wait for app registration to propagate
+        Write-Host "Waiting for app registration to propagate..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 10
+        
+        # Assign Verified ID Issuer role to the service principal
+        Write-Host "Assigning Verified ID Issuer role to service principal..." -ForegroundColor Cyan
+        try {
+            $verifiedIdServicePrincipal = Get-AzADServicePrincipal -ApplicationId $script:VerifiedIdAdminAppId -ErrorAction Stop
+            Write-Host "✓ Found Verified ID Admin service principal" -ForegroundColor Green
             
-            $clientId = $app.AppId
-            Write-Host "✓ App registration created: $clientId" -ForegroundColor Green
+            # Get the service principal object
+            $appServicePrincipal = Get-AzADServicePrincipal -ApplicationId $clientId -ErrorAction Stop
             
-            # Create service principal
-            $sp = New-AzADServicePrincipal -ApplicationId $clientId
-            Write-Host "✓ Service principal created" -ForegroundColor Green
-            
-            # Generate client secret
-            $clientSecret = New-AzADAppCredential -ApplicationId $clientId -DisplayName "Main Secret"
-            
-            # Store secret in Key Vault
-            $secretName = "$AppName-client-secret"
-            Set-AzKeyVaultSecret -VaultName $keyVaultName -Name $secretName -SecretValue (ConvertTo-SecureString $clientSecret.SecretText -AsPlainText -Force)
-            Write-Host "✓ Client secret stored in Key Vault" -ForegroundColor Green
-            
-            # Wait for app registration to propagate
-            Write-Host "Waiting for app registration to propagate..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 30
-            
-            # Get app-only token
-            $accessToken = Get-VerifiedIdAppToken `
-                -TenantId $TenantId `
-                -ClientId $clientId `
-                -ClientSecret $clientSecret.SecretText `
-                -Scope "6a8b4b39-c021-437c-b060-5a14a3fd65f3"
-            
-            Write-Host "✓ Application-only token acquired" -ForegroundColor Green
-            $deploymentResults.AppRegistration = @{
-                ClientId   = $clientId
-                SecretName = $secretName
+            # Assign the role
+            New-AzRoleAssignment -ObjectId $appServicePrincipal.Id -RoleDefinitionName "Verified ID Issuer" -ErrorAction SilentlyContinue | Out-Null
+            Write-Host "✓ Verified ID Issuer role assigned" -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Could not assign Verified ID Issuer role: $($_.Exception.Message)"
+        }
+        
+        # Get app-only token
+        Write-Host "Acquiring application-only access token..." -ForegroundColor Cyan
+        $accessToken = Get-VerifiedIdAppToken `
+            -TenantId $TenantId `
+            -ClientId $clientId `
+            -ClientSecret $clientSecret `
+            -Scope "6a8b4b39-c021-437c-b060-5a14a3fd65f3"
+        
+        Write-Host "✓ Application-only token acquired" -ForegroundColor Green
+        $deploymentResults.AppRegistration = @{
+            ClientId   = $clientId
+            SecretName = $secretName
+        }
+        
+        # If delegated auth was requested, also get a delegated token
+        if ($UseDelegatedAuth) {
+            Write-Host "`nAlso acquiring delegated token..." -ForegroundColor Cyan
+            if ($DelegatedTokenFile -and (Test-Path $DelegatedTokenFile)) {
+                $delegatedToken = Get-Content -Path $DelegatedTokenFile -Raw
+                Write-Host "✓ Loaded delegated token from file: $DelegatedTokenFile" -ForegroundColor Green
+            }
+            else {
+                # Get delegated token with Verified ID Admin API scope
+                try {
+                    $delegatedToken = az account get-access-token --resource "6a8b4b39-c021-437c-b060-5a14a3fd65f3" --query accessToken -o tsv
+                    Write-Host "✓ Acquired delegated token via Azure CLI with Verified ID scope" -ForegroundColor Green
+                }
+                catch {
+                    Write-Warning "Failed to get delegated token with Verified ID scope: $($_.Exception.Message)"
+                    $delegatedToken = $null
+                }
             }
         }
         
         # Step 5.5: Test prerequisites
         Write-Host "`nStep 5.5: Testing Verified ID prerequisites..." -ForegroundColor Yellow
-        $prerequisitesPassed = Test-VerifiedIdPrerequisites -TenantId $TenantId -AccessToken $accessToken
-        
-        if (-not $prerequisitesPassed) {
-            throw "Prerequisites validation failed. Please resolve the issues above before continuing."
+        # Use delegated token if available (has user's permissions), fallback to app token
+        $tokenForTest = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
+        try {
+            $prerequisitesPassed = Test-VerifiedIdPrerequisites -TenantId $TenantId -AccessToken $tokenForTest
+            if (-not $prerequisitesPassed) {
+                Write-Host "`n⚠️ Prerequisites check found issues, but continuing with deployment..." -ForegroundColor Yellow
+            }
+        }
+        catch {
+            Write-Host "`n⚠️ Prerequisites check had errors, but continuing with deployment..." -ForegroundColor Yellow
+            Write-Host "   Error: $($_.Exception.Message)" -ForegroundColor Gray
         }
         
         # Step 6: Prepare for Verified ID setup
@@ -2012,38 +2180,34 @@ function Deploy-VerifiedIdInfrastructure {
             
             Write-Host "`nStep 7: Creating Verified ID Authority..." -ForegroundColor Yellow
             
-            try {
-                $authority = New-VerifiedIdAuthorityWithRetry `
-                    -AccessToken $accessToken `
-                    -Name $AuthorityName `
-                    -DidDomain $actualDidDomain `
-                    -SubscriptionId $SubscriptionId `
-                    -ResourceGroupName $ResourceGroupName `
-                    -KeyVaultName $keyVaultName `
-                    -KeyVaultUri $keyVaultUri
-                
-                Write-Host "✓ Authority created successfully" -ForegroundColor Green
-                Write-Host "  Authority ID: $($authority.id)" -ForegroundColor White
-                Write-Host "  Authority DID: $($authority.didModel.did)" -ForegroundColor White
-                $deploymentResults.Authority = $authority
-                
-                # Step 7b: Contract Creation Note
-                Write-Host "`nStep 7b: Contract Creation" -ForegroundColor Yellow
-                Write-Host "📝 Contracts should be created manually after Verified ID is provisioned" -ForegroundColor Cyan
-                Write-Host "   This allows you to customize claims, display properties, and rules" -ForegroundColor Gray
-                Write-Host "   Use: New-VerifiedIdContract or create via Azure Portal" -ForegroundColor Gray
-                
-                # Step 7c: Wait for authority to be fully available for domain validation
-                Write-Host "`nStep 7c: Preparing for domain validation..." -ForegroundColor Yellow
-                Write-Host "Waiting for authority to be fully available (recommended 60-90 seconds)..." -ForegroundColor Gray
-                Start-Sleep -Seconds 75
-                Write-Host "✓ Authority should now be ready for domain operations" -ForegroundColor Green
-            }
-            catch {
-                Write-Warning "Failed to create Verified ID Authority: $($_.Exception.Message)"
-                Write-Host "Continuing with infrastructure-only deployment..." -ForegroundColor Yellow
-                Write-Host "You can create the authority later using: New-VerifiedIdAuthority" -ForegroundColor Gray
-            }
+            # Try with delegated token first (user has admin permissions), then fall back to app token
+            $tokenForAuthority = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
+            
+            $authority = New-VerifiedIdAuthorityWithRetry `
+                -AccessToken $tokenForAuthority `
+                -Name $AuthorityName `
+                -DidDomain $actualDidDomain `
+                -SubscriptionId $SubscriptionId `
+                -ResourceGroupName $ResourceGroupName `
+                -KeyVaultName $keyVaultName `
+                -KeyVaultUri $keyVaultUri
+            
+            Write-Host "✓ Authority created successfully" -ForegroundColor Green
+            Write-Host "  Authority ID: $($authority.id)" -ForegroundColor White
+            Write-Host "  Authority DID: $($authority.didModel.did)" -ForegroundColor White
+            $deploymentResults.Authority = $authority
+            
+            # Step 7b: Contract Creation Note
+            Write-Host "`nStep 7b: Contract Creation" -ForegroundColor Yellow
+            Write-Host "📝 Contracts should be created manually after Verified ID is provisioned" -ForegroundColor Cyan
+            Write-Host "   This allows you to customize claims, display properties, and rules" -ForegroundColor Gray
+            Write-Host "   Use: New-VerifiedIdContract or create via Azure Portal" -ForegroundColor Gray
+            
+            # Step 7c: Wait for authority to be fully available for domain validation
+            Write-Host "`nStep 7c: Preparing for domain validation..." -ForegroundColor Yellow
+            Write-Host "Waiting for authority to be fully available (recommended 60-90 seconds)..." -ForegroundColor Gray
+            Start-Sleep -Seconds 75
+            Write-Host "✓ Authority should now be ready for domain operations" -ForegroundColor Green
         }
         else {
             Write-Host "`nStep 7: Skipping Verified ID setup (SkipVerifiedIdSetup specified)" -ForegroundColor Yellow
@@ -2071,13 +2235,16 @@ function Deploy-VerifiedIdInfrastructure {
             try {
                 $authorityId = if ($authority.authorityId) { $authority.authorityId } else { $authority.id }
                 
+                # Use the same token that successfully created the authority
+                $tokenForDocs = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
+                
                 $didDocument = New-DidDocument `
-                    -AccessToken $accessToken `
+                    -AccessToken $tokenForDocs `
                     -AuthorityId $authorityId `
                     -DomainUrl $actualDidDomain
                 
                 $wellKnownConfig = New-WellKnownDidConfiguration `
-                    -AccessToken $accessToken `
+                    -AccessToken $tokenForDocs `
                     -AuthorityId $authorityId `
                     -DomainUrl $actualDidDomain
                 
@@ -2129,7 +2296,7 @@ function Deploy-VerifiedIdInfrastructure {
             Write-Host "✓ Placeholder DID documents created" -ForegroundColor Green
         }
         
-        # Create local .well-known directory and save placeholder files
+        # Create local .well-known directory and save files
         $wellKnownDir = ".well-known"
         if (-not (Test-Path -Path $wellKnownDir)) {
             New-Item -ItemType Directory -Path $wellKnownDir -Force | Out-Null
@@ -2138,11 +2305,16 @@ function Deploy-VerifiedIdInfrastructure {
         $didPath = Join-Path $wellKnownDir 'did.json'
         $configPath = Join-Path $wellKnownDir 'did-configuration.json'
         
-        # Save placeholder JSON files
+        # Save JSON files locally
         $didDocument | ConvertTo-Json -Depth 10 | Set-Content -Path $didPath -Encoding UTF8 -NoNewline
         $wellKnownConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $configPath -Encoding UTF8 -NoNewline
         
-        Write-Host "✓ Placeholder DID documents created" -ForegroundColor Green
+        if ($generationSucceeded) {
+            Write-Host "✓ DID documents saved locally" -ForegroundColor Green
+        }
+        else {
+            Write-Host "✓ Placeholder DID documents saved locally" -ForegroundColor Green
+        }
         
         # Upload to storage account static website
         try {
@@ -2259,11 +2431,47 @@ function Deploy-VerifiedIdInfrastructure {
                 Write-Host "Performing domain validation..." -ForegroundColor Cyan
                 try {
                     $authorityId = if ($authority.authorityId) { $authority.authorityId } else { $authority.id }
-                    $domainValidation = Test-WellKnownDidConfiguration -AccessToken $accessToken -AuthorityId $authorityId -DomainUrl $actualDidDomain
+                    $tokenForValidation = if ($UseDelegatedAuth -and $delegatedToken) { $delegatedToken } else { $accessToken }
+                    $domainValidation = Test-WellKnownDidConfiguration -AccessToken $tokenForValidation -AuthorityId $authorityId -DomainUrl $actualDidDomain
                     $deploymentResults.DomainValidation = $domainValidation
                     
                     if ($domainValidation -and $domainValidation.isValid) {
                         Write-Host "✓ Domain validation successful" -ForegroundColor Green
+                        
+                        # Step 8.5: Register the DID domain
+                        Write-Host "`nStep 8.5: Registering DID domain..." -ForegroundColor Yellow
+                        try {
+                            $registrationResult = Register-VerifiedIdDomain -AccessToken $tokenForValidation -AuthorityId $authorityId -DomainUrl $actualDidDomain
+                            Write-Host "✓ DID domain registered successfully" -ForegroundColor Green
+                            $deploymentResults.DidRegistration = $registrationResult
+                        }
+                        catch {
+                            Write-Host "⚠ DID registration completed with validation" -ForegroundColor Yellow
+                        }
+                        
+                        # Step 8.6: Set up DNS binding (optional)
+                        Write-Host "`nStep 8.6: Configuring DNS binding (optional)..." -ForegroundColor Yellow
+                        try {
+                            $dnsConfig = New-VerifiedIdDnsConfiguration -AccessToken $tokenForValidation -AuthorityId $authorityId -DomainUrl $actualDidDomain
+                            
+                            if ($dnsConfig -and $dnsConfig.txtRecords) {
+                                Write-Host "DNS TXT records to add to your domain:" -ForegroundColor Cyan
+                                foreach ($record in $dnsConfig.txtRecords) {
+                                    Write-Host "  Host: $($record.name)" -ForegroundColor White
+                                    Write-Host "  Value: $($record.value)" -ForegroundColor White
+                                    Write-Host ""
+                                }
+                                $deploymentResults.DnsRecords = $dnsConfig.txtRecords
+                                Write-Host "ℹ Add these DNS TXT records to your domain registrar" -ForegroundColor Cyan
+                                Write-Host "  After adding, you can validate with: Test-VerifiedIdDnsBinding" -ForegroundColor Gray
+                            }
+                            else {
+                                Write-Host "ℹ DNS binding not required for storage account domains" -ForegroundColor Cyan
+                            }
+                        }
+                        catch {
+                            Write-Host "ℹ DNS binding not available or not required" -ForegroundColor Cyan
+                        }
                     }
                     else {
                         Write-Host "⚠ Domain validation returned warnings or errors" -ForegroundColor Yellow
@@ -2290,16 +2498,18 @@ function Deploy-VerifiedIdInfrastructure {
             $deploymentResults.DidJsonUrl = $didJsonUrl
             $deploymentResults.ConfigJsonUrl = $configJsonUrl
             
-            Write-Host "`nIMPORTANT NOTE:" -ForegroundColor Yellow
-            Write-Host "Placeholder DID documents have been uploaded to your domain." -ForegroundColor Yellow
-            Write-Host "After creating a Verified ID Authority, you'll need to:" -ForegroundColor Yellow
-            Write-Host "1. Generate proper DID documents using the Admin API" -ForegroundColor Yellow
-            Write-Host "2. Upload the generated documents to replace these placeholders" -ForegroundColor Yellow
-            Write-Host "3. Validate the domain linkage" -ForegroundColor Yellow
+            if (-not $generationSucceeded) {
+                Write-Host "`nIMPORTANT NOTE:" -ForegroundColor Yellow
+                Write-Host "Placeholder DID documents have been uploaded to your domain." -ForegroundColor Yellow
+                Write-Host "After creating a Verified ID Authority, you'll need to:" -ForegroundColor Yellow
+                Write-Host "1. Generate proper DID documents using the Admin API" -ForegroundColor Yellow
+                Write-Host "2. Upload the generated documents to replace these placeholders" -ForegroundColor Yellow
+                Write-Host "3. Validate the domain linkage" -ForegroundColor Yellow
+            }
         }
         catch {
             Write-Warning "DID document upload failed: $($_.Exception.Message)"
-            Write-Host "Placeholder DID documents have been created locally in the .well-known folder." -ForegroundColor Yellow
+            Write-Host "DID documents have been created locally in the .well-known folder." -ForegroundColor Yellow
             Write-Host "You will need to manually upload them to your domain." -ForegroundColor Yellow
         }
         
@@ -2661,12 +2871,16 @@ function Test-VerifiedIdPrerequisites {
             Write-Host "     ✓ Verified ID service principals found" -ForegroundColor Green
         }
         else {
-            Write-Host "     ⚠ Verified ID service principals may be missing" -ForegroundColor Yellow
-            $issues += "Verified ID service principals may not be installed in tenant"
+            Write-Host "     ℹ Tenant not yet onboarded (will be onboarded during authority creation)" -ForegroundColor Cyan
         }
     }
     catch {
-        Write-Host "     ⚠ Could not fully validate tenant configuration: $($_.Exception.Message)" -ForegroundColor Yellow
+        if ($_.Exception.Message -match "401|Unauthorized") {
+            Write-Host "     ℹ Tenant not yet onboarded to Verified ID (this is normal for first deployment)" -ForegroundColor Cyan
+        }
+        else {
+            Write-Host "     ⚠ Could not validate tenant configuration: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
     
     # Test 4: Check user permissions

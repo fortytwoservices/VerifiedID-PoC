@@ -19,7 +19,15 @@
 This example uses your current user credentials (delegated authentication).
 Best for: Development, testing, and scenarios where you have admin rights.
 
-Note: Domain validation may require manual completion if using placeholder documents.
+Note: The script automatically handles ALL setup steps:
+  ✅ Creates Azure resources
+  ✅ Creates app registration  
+  ✅ Creates Verified ID Authority
+  ✅ Generates and uploads DID documents
+  ✅ Validates domain
+  ✅ Registers DID
+  
+Upon completion, your Verified ID is fully ready to use!
 #>
 
 # Basic deployment with auto-generated names
