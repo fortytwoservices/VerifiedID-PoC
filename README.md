@@ -1,484 +1,361 @@
 # Microsoft Entra Verified ID PowerShell Module
 
-A comprehensive PowerShell module for deploying and managing Microsoft Entra Verified ID infrastructure, including Azure resources, authorities, contracts, and credential operations.
+A PowerShell module for fully automated deployment and management of Microsoft Entra Verified ID infrastructure on Azure.
 
-## [→] Features
+---
 
-### Complete Infrastructure Deployment
-- **Azure Resource Group** creation and management
-- **Storage Account** with static website hosting for DID documents  
-- **Key Vault** with proper access policies for secure key storage
-- **Service Principal** configuration with appropriate roles
+## Features
 
-### Verified ID Management
-- **Authority** creation with automatic propagation handling
-- **DID Registration** with automated domain validation
-- **DID Documents** generation and upload to Azure Storage
-- **Domain Validation** with automatic refresh and registration
-- **Contract** creation with customizable claims and display properties
-- **Credential Issuance** and **Verification** workflows
-- **App Registration** creation with required permissions for Verified ID
+- **One-command deployment** — creates every Azure resource and Verified ID object automatically
+- **Storage Account** with static website hosting for DID documents
+- **Key Vault** switched to Vault Access Policy mode with the correct per-principal permissions required by Verified ID
+- **Authority creation** with retry and exponential back-off
+- **DID document generation** via the Admin API and automatic upload to storage
+- **Domain validation and DID registration** fully automated
+- **Credential issuance and presentation** request flows
+- **Complete cleanup** via a single removal function
+- **Prerequisite diagnostics** — validates token, API connectivity, tenant onboarding, and Key Vault access policy configuration
 
-### Advanced Capabilities
-- **Strategic Timing**: Built-in wait periods for Azure propagation
-- **Retry Logic**: Exponential backoff for transient failures
-- **Flexible Authentication**: Supports both delegated and application-only auth
-- **Comprehensive Cleanup**: Complete infrastructure removal capabilities
-- **Error Handling**: Detailed error reporting and recovery suggestions
+---
 
-## [✓] What Gets Automated
+## What the deployment does, step by step
 
-The `Deploy-VerifiedIdInfrastructure` function fully automates all the manual steps from the Azure Portal setup wizard:
+`Deploy-VerifiedIdInfrastructure` executes the following steps in order. Every step includes error handling and descriptive console output.
 
-| Step | Manual Process | Automated By Script |
-|------|---|---|
-| **1. Infrastructure** | Create storage account, key vault | ✅ Automatic |
-| **2. Authority Creation** | Create via Portal | ✅ Automatic |
-| **3. DID Documents** | Generate via Admin API | ✅ Automatic |
-| **4. Upload DID Documents** | Manual upload to storage | ✅ Automatic |
-| **5. Domain Validation** | Click "Refresh" button in Portal | ✅ Automatic |
-| **6. DID Registration** | Click "Register" button in Portal | ✅ Automatic |
+### Step 1 — Connect to Azure
+Verifies that an active Azure PowerShell session exists. If not, prompts for login.
 
-**Result**: All three setup checkmarks in Azure Portal ✅ automatically completed on first run!
+### Step 2 — Resource Group
+Creates the resource group if it does not exist.
 
-## [i] Prerequisites
+### Step 3 — Storage Account
+Creates a `Standard_LRS StorageV2` storage account and enables **static website hosting** (`$web` container). The static website URL becomes the DID domain (`did:web:<hostname>`).
 
-### PowerShell Requirements
-- **PowerShell 7.0+** (PowerShell Core)
-- **Az PowerShell Modules**: `Az.Accounts`, `Az.Resources`, `Az.Storage`, `Az.KeyVault`
+If the storage account name is already taken globally (e.g. from a previous failed run), the script recovers the existing account from the resource group instead of failing.
 
-### Azure Requirements
-- **Azure Subscription** with appropriate permissions
-- **Entra ID Tenant** with Microsoft Entra Verified ID enabled
-- **Global Administrator** or **Application Administrator** role in the tenant
-- **Azure CLI** (`az login`) authenticated before running the script
-- **Custom Domain** (optional, can use storage static website domain)
+### Step 4 — Key Vault *(most important step)*
 
-### Authentication
-- **Delegated User Authentication**: Script uses your user credentials via `az login`
-- **App-Only Authentication**: Not currently supported due to Microsoft API limitations
+This step does four things in sequence:
 
-## [⚙] Installation
+1. **Creates** the Key Vault (`Standard` SKU) if it does not exist.
+2. **Assigns `Key Vault Administrator`** to the currently logged-in user so they can manage keys and policies.
+3. **Switches the vault to Vault Access Policy mode** (disables RBAC authorization).
+   Verified ID cannot use a vault that is in RBAC-only mode — it calls the Key Vault data-plane under its own service principal identity, not under the deploying user. The switch is done via a direct ARM REST PATCH (`Invoke-AzRestMethod`) so it works on any Az module version.
+4. **Assigns the three required Key Vault access policies** to the Verified ID service principals:
 
-### 1. Install Prerequisites
+   | Service Principal | Key Permissions |
+   |---|---|
+   | Verifiable Credentials Service | Get, Sign |
+   | Verifiable Credentials Service Admin | Get, Create, Sign |
+   | Verifiable Credentials Service Request | Sign |
+
+   If a service principal is not yet provisioned in the tenant (normal on first-ever use), the step logs an informational message and continues. Re-running after the first authority creation will fill in any missing policies.
+
+### Step 5 — Acquire delegated token
+Calls `az account get-access-token` with the Verified ID Admin API scope (`6a8b4b39-c021-437c-b060-5a14a3fd65f3`). Also ensures the current user has the `Verified ID Administrator` role.
+
+### Step 5.5 — Prerequisite check
+Runs `Test-VerifiedIdPrerequisites` to validate:
+1. Token is valid and has the correct audience
+2. The Verified ID Admin API is reachable
+3. Tenant onboarding status
+4. User permissions
+
+> The Key Vault check is intentionally skipped here because Step 4 already configured the vault. ARM has a short cache lag that would cause a false-positive RBAC error if the vault were queried immediately after the switch.
+
+### Step 6 — Infrastructure ready
+Resolves the final Key Vault URI and storage static website URL that will be used for the authority.
+
+### Step 6.5 — Stabilization wait
+Waits 30 seconds for Key Vault and storage to propagate before authority creation is attempted.
+
+### Step 7 — Create Verified ID Authority
+Calls the Verified ID Admin API to create an authority using `did:web` with the storage static website as the domain. Retried up to 3 times with back-off.
+
+### Step 7c — Propagation wait
+Waits 75 seconds for the authority to become fully available in Microsoft's backend before generating DID documents.
+
+### Step 8 — Generate and upload DID documents
+Generates `did.json` and `did-configuration.json` via the Admin API and uploads them to the `$web` container of the storage account. Falls back to storage account key authentication if RBAC upload fails. Verifies both URLs return HTTP 200.
+
+### Step 8.5 — Domain validation and DID registration
+Waits 45 seconds for storage replication, then calls `Test-WellKnownDidConfiguration` to validate that Microsoft can fetch and verify the DID documents. If validation passes, calls `Register-VerifiedIdDomain` to complete DID registration.
+
+---
+
+## Prerequisites
+
+| Requirement | Detail |
+|---|---|
+| PowerShell | 7.0+ (PowerShell Core) |
+| Az modules | `Az.Accounts`, `Az.Resources`, `Az.Storage`, `Az.KeyVault` |
+| Azure CLI | `az login` must be completed before running |
+| Azure role | Owner or Contributor on the subscription/resource group |
+| Entra role | **Global Administrator** or **Application Administrator** |
+| Verified ID role | **Verified ID Administrator** (assigned automatically if missing) |
+
+---
+
+## Installation
+
 ```powershell
 # Install required Azure PowerShell modules
 Install-Module -Name Az.Accounts, Az.Resources, Az.Storage, Az.KeyVault -Force
 
-# Update to PowerShell 7+ if needed
-# Download from: https://github.com/PowerShell/PowerShell/releases
-```
-
-### 2. Download and Import Module
-```powershell
-# Download the module files to a local directory
 # Import the module
 Import-Module .\VerifiedID.psm1 -Force
 ```
 
-### 3. Verify Installation
+---
+
+## Quick start
+
 ```powershell
-Get-Module VerifiedID
-Get-Command -Module VerifiedID
-```
+# 1. Log in
+az login
+az account set --subscription "your-subscription-id"
 
-## [>] Quick Start
+# 2. Import module
+Import-Module .\VerifiedID.psm1 -Force
 
-### Prerequisites
-1. Ensure you have PowerShell 7+ and Az modules installed
-2. Authenticate with Azure and Verified ID scope:
-   ```powershell
-   az login
-   az account set --subscription "your-subscription-id"
-   ```
-3. Import the module:
-   ```powershell
-   Import-Module .\VerifiedID.psm1 -Force
-   ```
-
-### Basic Deployment
-```powershell
-# Deploy complete Verified ID infrastructure
-# Uses your current user credentials (must be logged in with az login)
+# 3. Deploy
 $deployment = Deploy-VerifiedIdInfrastructure `
     -SubscriptionId "your-subscription-id" `
     -ResourceGroupName "rg-verifiedid-demo" `
-    -Location "East US" `
+    -Location "northeurope" `
     -TenantId "your-tenant-id"
 
-# Access results
-Write-Host "Authority DID: $($deployment.Authority.didModel.did)"
-Write-Host "Storage URL: $($deployment.StorageAccount.PrimaryEndpoints.Web)"
+# Outputs
+$deployment.AuthorityDID    # did:web:...
+$deployment.AuthorityId     # GUID
+$deployment.DomainValidated # True/False
 ```
 
-### Infrastructure Only
+### Optional parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `-Prefix` | auto | Prefix for resource names |
+| `-AuthorityName` | `MyVerifiedIDAuthority` | Name of the Verified ID authority |
+| `-ContractName` | `MyCredentialContract` | Default contract name |
+| `-SkipVerifiedIdSetup` | `$false` | Deploy infrastructure only, skip authority |
+| `-DelegatedTokenFile` | — | Path to a pre-acquired token file |
+
+---
+
+## Infrastructure-only deployment
+
+Deploys the Azure resources (storage + Key Vault) without creating an authority. Useful when you want to configure the authority manually or via a separate script.
+
 ```powershell
-# Deploy just the Azure infrastructure
 $infra = Deploy-VerifiedIdInfrastructureOnly `
     -SubscriptionId "your-subscription-id" `
     -ResourceGroupName "rg-verifiedid-infra" `
-    -Location "Central US" `
-    -TenantId "your-tenant-id" `
-    -Prefix "myorg"
+    -Location "northeurope" `
+    -TenantId "your-tenant-id"
 ```
 
-## [⏱] Timing Expectations
+---
 
-**Complete Deployment**: 1-2 minutes (fully automated)
-- Infrastructure creation: ~30 seconds
-- Authority creation: ~10 seconds
-- Authority propagation wait: ~75 seconds  
-- DID document generation & upload: ~20 seconds
-- Storage replication & validation: ~45 seconds
-- Total: ~1-2 minutes
+## Working with an existing deployment
 
-**Infrastructure Only**: 1-2 minutes
-
-The script includes strategic wait periods to handle Azure propagation. Domain ownership is automatically verified when DID documents are validated as accessible at the domain.
-
-## [*] Authentication
-
-### How It Works
-The script uses **delegated user authentication** - your current user credentials from `az login`:
-
-1. User logs in with `az login` (requires Global Admin or Application Administrator role)
-2. Script acquires delegated token using Azure CLI
-3. Token carries your user's permissions for Verified ID operations
-4. All operations execute with your admin context
-
-### Why Delegated Auth Only?
-- **Required by Microsoft**: Authority creation requires user context
-- **Simpler Setup**: No app registration needed, uses existing credentials
-- **Immediate Access**: User permissions apply immediately, no propagation delays
-- **Reduced Complexity**: Fewer moving parts, easier troubleshooting
-
-### App-Only Authentication
-❌ **Not currently supported** - Microsoft Verified ID APIs require user context for authority operations. Creating authorities with service principal credentials results in 403 Forbidden errors.
-
-## [*] Core Functions
-
-### Deployment Functions
-- `Deploy-VerifiedIdInfrastructure` - Complete infrastructure + Verified ID setup
-- `Deploy-VerifiedIdInfrastructureOnly` - Azure infrastructure only
-- `Remove-VerifiedIdInfrastructure` - Complete cleanup and removal
-
-### Verified ID Management
-- `New-VerifiedIdAuthority` - Create new authority
-- `New-VerifiedIdAuthorityWithRetry` - Authority creation with retry logic
-- `New-VerifiedIdContract` - Create credential contracts
-- `New-VerifiedIdContractWithRetry` - Contract creation with retry logic
-
-### Credential Operations
-- `Start-VcIssuance` - Issue credentials to users
-- `Start-VcPresentation` - Request credential presentations
-- `Publish-VerifiedIdContract` - Publish contracts to make them active
-
-### DID Document Management
-- `New-DidDocument` - Generate DID documents via Admin API
-- `New-WellKnownDidConfiguration` - Generate well-known configuration
-- `Test-WellKnownDidConfiguration` - Validate domain linkage
-- `Register-VerifiedIdDomain` - Register DID with authority (triggers domain validation)
-- `New-VerifiedIdDnsConfiguration` - Generate DNS records for domain binding
-- `Test-VerifiedIdDnsBinding` - Validate DNS binding configuration
-
-### Authentication & Token Functions
-- `Get-VerifiedIdAppToken` - Get app-only access tokens
-- `Get-VerifiedIdDelegatedToken` - Get delegated access tokens
-- `Get-VerifiedIdTokenFromKeyVault` - Retrieve tokens from Key Vault
-- `Get-VerifiedIdAdminToken` - Get admin API tokens
-- `Get-VerifiedIdRequestToken` - Get request service tokens
-- `Test-VerifiedIdToken` - Validate token functionality
-
-### Utility Functions
-- `Connect-VerifiedIdAzure` - Azure authentication helper
-- `Invoke-VerifiedIdApi` - Direct API calls to Verified ID service
-- `Get-VerifiedIdAuthority` - List authorities
-- `Get-VerifiedIdAuthorityDetail` - Get detailed authority information
-
-## [📂] Module Structure
-
-```
-VerifiedID_Module/
-├── VerifiedID.psd1          # Module manifest
-├── VerifiedID.psm1          # Main module implementation  
-├── Example_Usage.ps1        # Usage examples
-└── Module_README.md         # This documentation
-```
-
-## [⚙] Configuration Options
-
-### Resource Naming
-- `Prefix` - Prefix for all resources (default: auto-generated)
-- Custom names supported for all resources
-- Automatic suffix generation for uniqueness
-
-### Security Configuration
-- Key Vault integration for secure credential storage
-- RBAC-based access control
-- Proper service principal permissions
-
-### Domain Configuration  
-- Custom domain support
-- Azure Storage static website hosting
-- Automatic DID document generation and hosting
-- Automatic domain validation and DID registration
-
-## [*] Deployment Workflow Details
-
-### Step-by-Step Automation
-
-**Step 1-4: Azure Infrastructure**
 ```powershell
-✅ Creates Resource Group
-✅ Creates Storage Account with static website 
-✅ Creates Key Vault
-✅ Assigns permissions
-```
+# Get a token
+$token = Get-VerifiedIdDelegatedToken -TenantId "your-tenant-id"
 
-**Step 5-7: Verified ID Setup**
-```powershell
-✅ Acquires delegated user token
-✅ Creates Verified ID Authority 
-✅ Waits 75 seconds for propagation
-✅ Validates prerequisites
-```
+# List authorities
+$authorities = Get-VerifiedIdAuthority -AccessToken $token
 
-**Step 8: DID Documents & Domain Ownership**
-```powershell
-✅ Generates real DID documents via Admin API
-✅ Uploads did.json to storage
-✅ Uploads did-configuration.json to storage
-✅ Validates document accessibility
-✅ Waits 45 seconds for storage replication
-✅ Verifies domain ownership (documents are accessible)
-✅ Automatically registers DID
-```
-
-**Result: All three Portal checkmarks ✅✅✅ automatically**
-
-- ✅ Configure organization (Authority created)
-- ✅ Register decentralized ID (DID documents hosted)
-- ✅ Verify domain ownership (Documents validated as accessible)
-
-## [*] Advanced Usage
-
-### Custom Contract Creation
-```powershell
-$token = Get-VerifiedIdDelegatedToken -TenantId $tenantId
-
+# Create an additional contract
 $contract = New-VerifiedIdContract `
     -AccessToken $token `
-    -AuthorityId $authority.id `
-    -Name "EmployeeCredential" `
-    -Type "EmployeeID" `
-    -Claims @("firstName", "lastName", "department", "employeeId") `
-    -DisplayName "Employee ID Card" `
-    -Description "Official company employee identification"
-```
+    -AuthorityId $authorities.value[0].id `
+    -Name "EmployeeID" `
+    -Type "EmployeeCredential" `
+    -Claims @("firstName", "lastName", "department")
 
-### Credential Issuance
-```powershell
+# Issue a credential
 $issuance = Start-VcIssuance `
     -AccessToken $token `
-    -AuthorityId $authority.id `
+    -AuthorityId $authorities.value[0].id `
     -ContractId $contract.id `
-    -Claims @{
-        firstName = "John"
-        lastName = "Doe" 
-        department = "Engineering"
-        employeeId = "EMP001"
-    } `
-    -CallbackUrl "https://your-app.com/callback"
-```
+    -Claims @{ firstName = "Jane"; lastName = "Doe"; department = "Engineering" } `
+    -CallbackUrl "https://your-app.example.com/callback"
 
-### Credential Verification
-```powershell
+# Request a presentation
 $presentation = Start-VcPresentation `
     -AccessToken $token `
-    -AuthorityId $authority.id `
-    -Type "EmployeeID" `
-    -AcceptedIssuers @($authority.didModel.did) `
-    -CallbackUrl "https://your-app.com/verify" `
+    -AuthorityId $authorities.value[0].id `
+    -Type "EmployeeCredential" `
+    -AcceptedIssuers @($authorities.value[0].didModel.did) `
+    -CallbackUrl "https://your-app.example.com/verify-callback" `
     -ValidateLinkedDomain
 ```
 
-### Domain Ownership Verification (Automatic)
+---
 
-During deployment, the script automatically verifies domain ownership:
+## Diagnosing an existing deployment
+
+`Test-VerifiedIdPrerequisites` validates a live deployment, including the Key Vault access policy configuration:
 
 ```powershell
-# Script validates that DID documents are hosted and accessible
-# This proves you control the domain
-# ✅ Verification automatic - no manual action needed
+$token = Get-VerifiedIdDelegatedToken -TenantId "your-tenant-id"
+
+Test-VerifiedIdPrerequisites `
+    -TenantId "your-tenant-id" `
+    -AccessToken $token `
+    -KeyVaultName "your-kv-name" `
+    -KeyVaultResourceId "/subscriptions/.../vaults/your-kv-name"
 ```
 
-**If verification needs retry:**
-```powershell
-# Run this if initial verification was still propagating
-$authorityId = "5f8fcf85-eb11-4207-551a-b29d4475d57d"  # Example
-Test-WellKnownDidConfiguration -AuthorityId $authorityId
-```
-
-**What happens:**
-1. Script uploads `did.json` and `did-configuration.json` to storage
-2. Waits 45 seconds for Azure Storage to replicate files globally
-3. Microsoft's service fetches and validates these files exist
-4. ✅ Domain ownership confirmed (you proved you control the domain)
-5. ✅ DID automatically registered
-
-**Helpful Resources:**
-- [Quickstart Guide](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart)
-- [Issue Credentials](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-idtoken)
-- [Request Presentations](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-presentation)
-- [Self-Issued Credentials](https://learn.microsoft.com/en-us/entra/verified-id/how-to-use-quickstart-selfissued)
-- [Rules & Display Model](https://learn.microsoft.com/en-us/entra/verified-id/rules-and-display-definitions-model)
-- [Credential Revocation](https://learn.microsoft.com/en-us/entra/verified-id/how-to-issuer-revoke)
-
-## [?] Troubleshooting
-
-### Common Issues and Solutions
-
-**Domain Ownership Verification Not Confirming**
-```
-This is normal! Azure Storage replication takes 30-60 seconds.
-After deployment:
-1. If still pending, wait another 30 seconds
-2. Run: Test-WellKnownDidConfiguration -AuthorityId $authorityId
-3. If still pending, wait 1-2 more minutes and retry
-```
-
-**Domain Ownership Verification Fails**
-```
-Check DID documents are properly uploaded:
-- did.json at /.well-known/did.json (HTTP 200 response)
-- did-configuration.json at /.well-known/did-configuration.json (HTTP 200 response)
-Verify storage static website is enabled
-Wait 45 seconds to 2 minutes for Azure Storage replication, then retry
-```
-
-**Authority Creation Fails**  
-```
-Ensure you have Verified ID Administrator role
-Verify Key Vault accessibility
-Check storage account static website URL is accessible
-Try redeploying if first attempt fails
-```
-
-**Storage Upload Fails**
-```
-Check RBAC permissions on storage account
-Verify static website is enabled
-Try storage account keys if RBAC fails
-```
-
-**Authentication Issues**
-```
-For delegated auth: Use 'az login' first
-Confirm user has Verified ID Administrator role
-Verify correct tenant ID
-```
-
-### Debug Mode
-```powershell
-$VerbosePreference = "Continue"
-$DebugPreference = "Continue"
-
-# Run deployment with detailed logging
-Deploy-VerifiedIdInfrastructure -Verbose -Debug
-```
-
-## [>] Monitoring and Validation
-
-### Deployment Validation
-```powershell
-# Check deployment results
-$deployment.AuthorityDID
-$deployment.AuthorityId
-$deployment.DomainValidated
-
-# Validate DID documents
-Test-WellKnownDidConfiguration -AccessToken $token -AuthorityId $authorityId -DomainUrl $domain
-```
-
-### Health Checks
-```powershell
-# Test token functionality
-Test-VerifiedIdToken -AccessToken $token
-
-# Verify storage hosting
-Invoke-WebRequest "$storageUrl/.well-known/did.json"
-Invoke-WebRequest "$storageUrl/.well-known/did-configuration.json"
-```
-
-## [*] Security Best Practices
-
-### Production Recommendations
-1. **Use Application Authentication** for automated scenarios
-2. **Store secrets in Key Vault** (automatically configured)
-3. **Implement proper RBAC** on Azure resources
-4. **Use custom domains** for production authorities
-5. **Enable monitoring** on Key Vault and Storage
-6. **Rotate credentials regularly**
-
-### Access Control
-- Service principals have minimal required permissions
-- Key Vault access policies restrict secret access
-- Storage accounts use RBAC where possible
-- App registrations follow principle of least privilege
-
-## [~] Scaling Considerations
-
-### Multiple Authorities
-- Each authority should have its own domain
-- Consider separate storage accounts for isolation
-- Use consistent naming conventions
-
-### High Availability
-- Deploy across multiple regions if needed
-- Use Azure Storage geo-redundancy
-- Implement proper backup procedures
-
-### Performance
-- Storage static websites provide global CDN
-- Consider Azure Front Door for custom domains
-- Monitor credential issuance volumes
-
-## [*] Contributing
-
-### Development Setup
-1. Clone or download the module
-2. Install development dependencies
-3. Run test deployments in dev environment
-4. Follow PowerShell best practices
-
-### Testing
-```powershell
-# Test individual functions
-Test-VerifiedIdToken -AccessToken $token
-New-DidDocument -AccessToken $token -AuthorityId $authId -DomainUrl "https://test.com" -WhatIf
-
-# Validate deployment in test environment
-Deploy-VerifiedIdInfrastructure -ResourceGroupName "test-rg" -WhatIf
-```
-
-## [i] License
-
-This project follows Microsoft's open source guidelines. See individual file headers for specific license information.
-
-## [>] References
-
-- [Microsoft Entra Verified ID Documentation](https://docs.microsoft.com/en-us/azure/active-directory/verifiable-credentials/)
-- [Verified ID Admin API Reference](https://docs.microsoft.com/en-us/graph/api/resources/verifiablecredentials-overview)
-- [Azure PowerShell Documentation](https://docs.microsoft.com/en-us/powershell/azure/)
-- [DID Specification](https://www.w3.org/TR/did-core/)
-
-## [*] Support
-
-For issues and questions:
-1. Review the troubleshooting section
-2. Check the example usage files
-3. Validate prerequisites are met
-4. Enable verbose/debug logging for detailed error information
+When `-KeyVaultName` is provided the check will:
+- Confirm the vault is in **Vault Access Policy mode** (flags RBAC mode as an error)
+- Verify all three VC service principals have the correct key permissions
+- Report exactly which permissions are missing if any
 
 ---
-**Note**: This module is designed for Microsoft Entra Verified ID and requires appropriate licenses and permissions. Ensure you understand the security implications and follow Microsoft's security best practices when deploying to production environments.
+
+## Key Vault — why Access Policy mode, not RBAC
+
+Azure Key Vault supports two authorization models:
+
+| Model | Works with Verified ID? |
+|---|---|
+| **Vault Access Policy** | ✅ Yes |
+| **Azure RBAC** | ❌ No |
+
+When Verified ID performs a signing operation it authenticates as its own service principal identity — not as the deploying user. Access policies are evaluated per service-principal object ID against the vault's own policy list. RBAC role assignments (e.g. `Key Vault Crypto Officer`) are not evaluated for data-plane calls when the vault is in Access Policy mode, and conversely, Access Policy entries are ignored when the vault is in RBAC mode.
+
+**This module switches every new vault to Access Policy mode and sets the required policies in Step 4**, before any other Verified ID work begins.
+
+If you manage the Key Vault outside this module, verify the three entries are present under **Key Vault → Access policies**:
+
+| Application | Key permissions |
+|---|---|
+| Verifiable Credentials Service | Get, Sign |
+| Verifiable Credentials Service Admin | Get, Create, Sign |
+| Verifiable Credentials Service Request | Sign |
+
+To switch an existing RBAC vault to Access Policy mode without the module:
+
+```powershell
+$kvId = (Get-AzKeyVault -VaultName "your-kv").ResourceId
+Invoke-AzRestMethod -Method PATCH `
+    -Path "${kvId}?api-version=2022-07-01" `
+    -Payload '{"properties":{"enableRbacAuthorization":false}}'
+```
+
+---
+
+## Cleanup
+
+```powershell
+Remove-VerifiedIdInfrastructure `
+    -SubscriptionId "your-subscription-id" `
+    -ResourceGroupName "rg-verifiedid-demo" `
+    -TenantId "your-tenant-id"
+```
+
+---
+
+## Troubleshooting
+
+### Domain validation still pending after deployment
+Storage replication takes 30–90 seconds. Wait and retry:
+```powershell
+Test-WellKnownDidConfiguration -AuthorityId "your-authority-id"
+```
+
+### Authority creation fails (403 Forbidden)
+- Confirm you are logged in with `az login` under an account that has the **Verified ID Administrator** role
+- The role is automatically assigned to the current user during deployment, but RBAC propagation can take a minute
+
+### Key Vault access policy errors / signing failures
+Run the diagnostic check:
+```powershell
+Test-VerifiedIdPrerequisites -TenantId "..." -AccessToken $token `
+    -KeyVaultName "your-kv" -KeyVaultResourceId $kvId
+```
+The check will report whether the vault is in the wrong mode or if any of the three service principal policies are missing or incomplete.
+
+### Storage account name conflict
+If a previous failed deployment left behind a storage account name, the script recovers it automatically from the resource group. If the name is taken by a different subscription, delete the old resource group first and re-run (a new random suffix is generated each time).
+
+### Token expired or wrong scope
+```powershell
+az logout
+az login --tenant "your-tenant-id"
+```
+
+---
+
+## Authentication
+
+The module uses **delegated user authentication** exclusively:
+
+1. User authenticates with `az login`
+2. Script acquires a token scoped to the Verified ID Admin API via Azure CLI
+3. All Verified ID API calls run under the user's identity
+
+**App-only (service principal) authentication is not supported** by Microsoft for authority management operations — requests return HTTP 403.
+
+---
+
+## Function reference
+
+### Deployment
+| Function | Description |
+|---|---|
+| `Deploy-VerifiedIdInfrastructure` | Full end-to-end deployment |
+| `Deploy-VerifiedIdInfrastructureOnly` | Azure resources only, no authority |
+| `Remove-VerifiedIdInfrastructure` | Delete all deployed resources |
+
+### Verified ID management
+| Function | Description |
+|---|---|
+| `New-VerifiedIdAuthority` | Create an authority |
+| `New-VerifiedIdContract` | Create a credential contract |
+| `Publish-VerifiedIdContract` | Publish (activate) a contract |
+| `Get-VerifiedIdAuthority` | List all authorities |
+| `Get-VerifiedIdAuthorityDetail` | Get full authority detail |
+
+### DID documents
+| Function | Description |
+|---|---|
+| `New-DidDocument` | Generate `did.json` via Admin API |
+| `New-WellKnownDidConfiguration` | Generate `did-configuration.json` |
+| `Test-WellKnownDidConfiguration` | Validate domain linkage |
+| `Register-VerifiedIdDomain` | Register DID domain with authority |
+
+### Credentials
+| Function | Description |
+|---|---|
+| `Start-VcIssuance` | Create a credential issuance request |
+| `Start-VcPresentation` | Create a credential presentation request |
+
+### Authentication
+| Function | Description |
+|---|---|
+| `Get-VerifiedIdDelegatedToken` | Get delegated user token |
+| `Get-VerifiedIdAppToken` | Get app-only token |
+| `Get-VerifiedIdTokenFromKeyVault` | Retrieve token using secret from Key Vault |
+| `Get-VerifiedIdAdminToken` | Shortcut for Admin API token |
+| `Get-VerifiedIdRequestToken` | Shortcut for Request Service token |
+| `Test-VerifiedIdToken` | Validate a token's audience and claims |
+
+### Diagnostics & utilities
+| Function | Description |
+|---|---|
+| `Test-VerifiedIdPrerequisites` | Full deployment health check including Key Vault IAM |
+| `Connect-VerifiedIdAzure` | Azure login helper |
+| `Invoke-VerifiedIdApi` | Raw call to the Verified ID REST API |
+
+---
+
+## References
+
+- [Microsoft Entra Verified ID documentation](https://learn.microsoft.com/en-us/entra/verified-id/)
+- [Verified ID Admin API](https://learn.microsoft.com/en-us/entra/verified-id/admin-api)
+- [Key Vault access policies vs RBAC](https://learn.microsoft.com/en-us/azure/key-vault/general/rbac-access-policy)
+- [DID Web method specification](https://w3c-ccg.github.io/did-method-web/)
+- [Credential rules and display model](https://learn.microsoft.com/en-us/entra/verified-id/rules-and-display-definitions-model)

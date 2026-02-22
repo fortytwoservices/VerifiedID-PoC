@@ -1899,19 +1899,46 @@ function Deploy-VerifiedIdInfrastructure {
             $storageAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $storageAccountName -ErrorAction SilentlyContinue
             if (-not $storageAccount) {
                 Write-Host "Creating new storage account '$storageAccountName'..." -ForegroundColor Cyan
-                $storageAccount = New-AzStorageAccount `
-                    -ResourceGroupName $ResourceGroupName `
-                    -Name $storageAccountName `
-                    -Location $Location `
-                    -SkuName "Standard_LRS" `
-                    -Kind "StorageV2"
+                try {
+                    $storageAccount = New-AzStorageAccount `
+                        -ResourceGroupName $ResourceGroupName `
+                        -Name $storageAccountName `
+                        -Location $Location `
+                        -SkuName "Standard_LRS" `
+                        -Kind "StorageV2" `
+                        -ErrorAction Stop
+                    Write-Host "✓ Storage Account '$storageAccountName' created" -ForegroundColor Green
+                }
+                catch {
+                    # A 'Conflict' (HTTP 409) means the name already exists globally — this can happen
+                    # when a previous deployment attempt failed after the account was created but before
+                    # the resource group lookup cached it. Try to retrieve the existing account.
+                    if ($_.Exception.Message -match 'Conflict|409|already exists|StorageAccountAlreadyTaken|AccountNameInvalid') {
+                        Write-Host "  Storage account name conflict — trying to retrieve existing account..." -ForegroundColor Yellow
+                        $storageAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $storageAccountName -ErrorAction SilentlyContinue
+                        if ($storageAccount) {
+                            Write-Host "✓ Recovered existing Storage Account '$storageAccountName'" -ForegroundColor Green
+                        }
+                        else {
+                            # Name is taken by a different subscription — rethrow with actionable message
+                            throw "Storage account name '$storageAccountName' is already taken globally by another subscription. " +
+                            "Delete the previous deployment resources or re-run (a new random suffix will be generated)."
+                        }
+                    }
+                    else {
+                        throw
+                    }
+                }
                 
-                Write-Host "✓ Storage Account '$storageAccountName' created" -ForegroundColor Green
-                
-                # Enable static website hosting
-                $ctx = $storageAccount.Context
-                Enable-AzStorageStaticWebsite -Context $ctx -IndexDocument "index.html" -ErrorDocument404Path "404.html"
-                Write-Host "✓ Static website hosting enabled" -ForegroundColor Green
+                # Enable static website hosting (only for freshly created or recovered accounts)
+                try {
+                    $ctx = $storageAccount.Context
+                    Enable-AzStorageStaticWebsite -Context $ctx -IndexDocument "index.html" -ErrorDocument404Path "404.html" -ErrorAction Stop
+                    Write-Host "✓ Static website hosting enabled" -ForegroundColor Green
+                }
+                catch {
+                    Write-Host "⚠ Could not enable static website hosting: $($_.Exception.Message)" -ForegroundColor Yellow
+                }
             }
             else {
                 Write-Host "✓ Using existing Storage Account '$storageAccountName'" -ForegroundColor Green
@@ -1977,6 +2004,106 @@ function Deploy-VerifiedIdInfrastructure {
                 Write-Host "⚠ Could not assign role (may already have permissions)" -ForegroundColor Yellow
             }
             
+            # Grant Verifiable Credentials Service principals the Key Vault Crypto Officer role.
+            # Without this the service cannot perform signing operations on credentials.
+            # These assignments are also checked by Test-VerifiedIdPrerequisites and are a
+            # common source of silent breakage when accidentally removed via IAM cleanup.
+            Write-Host "Assigning Key Vault Crypto Officer role to Verifiable Credentials Service principals..." -ForegroundColor Cyan
+            $vcServiceAppIds = @(
+                @{ AppId = "3db474b9-6a0c-4840-96ac-1fceb342124f"; DisplayName = "Verifiable Credentials Service Request" },
+                @{ AppId = "6a8b4b39-c021-437c-b060-5a14a3fd65f3"; DisplayName = "Verifiable Credentials Service Admin" }
+            )
+            foreach ($vcApp in $vcServiceAppIds) {
+                try {
+                    $vcSp = Get-AzADServicePrincipal -ApplicationId $vcApp.AppId -ErrorAction SilentlyContinue
+                    if ($vcSp) {
+                        New-AzRoleAssignment `
+                            -ObjectId $vcSp.Id `
+                            -RoleDefinitionName "Key Vault Crypto Officer" `
+                            -Scope $keyVault.ResourceId `
+                            -ErrorAction SilentlyContinue | Out-Null
+                        Write-Host "✓ Key Vault Crypto Officer assigned to '$($vcApp.DisplayName)'" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "  ℹ '$($vcApp.DisplayName)' not yet provisioned (expected before first authority creation)" -ForegroundColor Cyan
+                    }
+                }
+                catch {
+                    Write-Host "⚠ Could not assign Crypto Officer to '$($vcApp.DisplayName)': $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+            
+            # Switch Key Vault to Vault Access Policy mode.
+            # Verified ID does NOT work with RBAC-only Key Vaults — the service calls the Key Vault
+            # data-plane using its own service principal identity, not the deploying user's identity.
+            # We do this here in Step 4 so that the Step 5.5 prerequisite check sees the vault
+            # already in the correct mode instead of always reporting a false-positive RBAC error.
+            Write-Host "Switching Key Vault '$keyVaultName' to Vault Access Policy mode..." -ForegroundColor Cyan
+            try {
+                # Patch enableRbacAuthorization via the ARM REST API directly.
+                # - Get-AzResource fails immediately after New-AzKeyVault (ARM indexing lag).
+                # - Update-AzKeyVault -EnableRbacAuthorization requires Az.KeyVault >= 3.4.1.
+                # Invoke-AzRestMethod uses the ResourceId we already have in memory, so neither
+                # of those problems apply.
+                $patchBody = '{"properties":{"enableRbacAuthorization":false}}'
+                $response = Invoke-AzRestMethod `
+                    -Method  PATCH `
+                    -Path    "$($keyVault.ResourceId)?api-version=2022-07-01" `
+                    -Payload $patchBody `
+                    -ErrorAction Stop
+                
+                if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+                    Write-Host "✓ Key Vault '$keyVaultName' is now in Vault Access Policy mode" -ForegroundColor Green
+                }
+                else {
+                    $errBody = $response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    throw "ARM returned HTTP $($response.StatusCode): $($errBody.error.message)"
+                }
+            }
+            catch {
+                Write-Host "⚠ Could not switch Key Vault permission model: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "  You may need to do this manually: Azure Portal > Key Vault > Settings > Access configuration" -ForegroundColor Gray
+            }
+            
+            # Set access policies for the three Verified ID first-party service principals.
+            # These are the exact permissions shown in the Verified ID portal:
+            #   Verifiable Credentials Service         Key: Get, Sign
+            #   Verifiable Credentials Service Admin   Key: Get, Create, Sign
+            #   Verifiable Credentials Service Request Key: Sign
+            Write-Host "Setting Key Vault Access Policies for Verified ID service principals..." -ForegroundColor Cyan
+            $vcKeyPolicies = @(
+                @{ AppId = '6a8b4b39-c021-437c-b060-5a14a3fd65f3'; DisplayName = 'Verifiable Credentials Service Admin'; KeyPermissions = @('Get', 'Create', 'Sign') },
+                @{ AppId = '3db474b9-6a0c-4840-96ac-1fceb342124f'; DisplayName = 'Verifiable Credentials Service Request'; KeyPermissions = @('Sign') },
+                @{ AppId = $null; DisplayName = 'Verifiable Credentials Service'; KeyPermissions = @('Get', 'Sign') }
+            )
+            foreach ($policy in $vcKeyPolicies) {
+                try {
+                    $sp = if ($policy.AppId) {
+                        Get-AzADServicePrincipal -ApplicationId $policy.AppId -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        Get-AzADServicePrincipal -DisplayName $policy.DisplayName -ErrorAction SilentlyContinue |
+                        Where-Object { $_.DisplayName -eq $policy.DisplayName } | Select-Object -First 1
+                    }
+                    if ($sp) {
+                        Set-AzKeyVaultAccessPolicy `
+                            -VaultName         $keyVaultName `
+                            -ResourceGroupName $ResourceGroupName `
+                            -ObjectId          $sp.Id `
+                            -PermissionsToKeys  $policy.KeyPermissions `
+                            -ErrorAction Stop
+                        Write-Host "✓ '$($policy.DisplayName)' → Keys: $($policy.KeyPermissions -join ', ')" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "  ℹ '$($policy.DisplayName)' not yet in tenant (will be provisioned on first authority creation — re-run after onboarding)" -ForegroundColor Cyan
+                    }
+                }
+                catch {
+                    Write-Host "⚠ Could not set access policy for '$($policy.DisplayName)': $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+            Write-Host "✓ Key Vault access policies configured" -ForegroundColor Green
+            
             Write-Host "Key Vault Name: $($keyVault.VaultName)" -ForegroundColor Gray
             Write-Host "Key Vault URI: $($keyVault.VaultUri)" -ForegroundColor Gray
             
@@ -2032,7 +2159,12 @@ function Deploy-VerifiedIdInfrastructure {
         Write-Host "`nStep 5.5: Testing Verified ID prerequisites..." -ForegroundColor Yellow
         $tokenForTest = $accessToken
         try {
-            $prerequisitesPassed = Test-VerifiedIdPrerequisites -TenantId $TenantId -AccessToken $tokenForTest
+            # Note: Key Vault params are intentionally omitted here — the vault was already
+            # switched to Access Policy mode and policies were set in Step 4. Passing them
+            # would cause a false-positive RBAC error due to ARM cache lag.
+            $prerequisitesPassed = Test-VerifiedIdPrerequisites `
+                -TenantId $TenantId `
+                -AccessToken $tokenForTest
             if (-not $prerequisitesPassed) {
                 Write-Host "`n[WARNING] Prerequisites check found issues, but continuing with deployment..." -ForegroundColor Yellow
             }
@@ -2523,6 +2655,7 @@ function Deploy-VerifiedIdInfrastructure {
             DidJsonUrl         = if ($deploymentResults.DidJsonUrl) { $deploymentResults.DidJsonUrl } else { $null }
             ConfigJsonUrl      = if ($deploymentResults.ConfigJsonUrl) { $deploymentResults.ConfigJsonUrl } else { $null }
             DomainValidated    = if ($deploymentResults.DomainValidation -and $deploymentResults.DomainValidation.isValid) { $true } else { $false }
+            KeyVaultMode       = 'AccessPolicy'
         }
         
         return $simplifiedResults
@@ -2682,6 +2815,7 @@ function Test-VerifiedIdPrerequisites {
     - User permissions
     - Token validity
     - API connectivity
+    - Key Vault IAM: Verifiable Credentials Service Crypto Officer/User role on the signing Key Vault
     
     .PARAMETER TenantId
     Azure AD tenant ID to test
@@ -2689,8 +2823,20 @@ function Test-VerifiedIdPrerequisites {
     .PARAMETER AccessToken
     Access token to test with
     
+    .PARAMETER KeyVaultName
+    Name of the Key Vault used for Verified ID signing keys. When provided, the function
+    will verify that the Verifiable Credentials Service has Key Vault Crypto Officer or
+    Key Vault Crypto User role — these are commonly accidentally removed and break signing.
+    
+    .PARAMETER KeyVaultResourceId
+    Full Azure resource ID of the Key Vault (e.g. /subscriptions/.../vaults/myvault).
+    Used to scope the role assignment lookup precisely.
+    
     .EXAMPLE
     Test-VerifiedIdPrerequisites -TenantId "12345678-1234-1234-1234-123456789012" -AccessToken $token
+    
+    .EXAMPLE
+    Test-VerifiedIdPrerequisites -TenantId "12345678-1234-1234-1234-123456789012" -AccessToken $token -KeyVaultName "kv-verifiedid" -KeyVaultResourceId $keyVault.ResourceId
     #>
     [CmdletBinding()]
     param(
@@ -2698,7 +2844,13 @@ function Test-VerifiedIdPrerequisites {
         [string]$TenantId,
         
         [Parameter(Mandatory)]
-        [string]$AccessToken
+        [string]$AccessToken,
+        
+        [Parameter()]
+        [string]$KeyVaultName = '',
+        
+        [Parameter()]
+        [string]$KeyVaultResourceId = ''
     )
     
     Write-Host "Testing Verified ID Prerequisites..." -ForegroundColor Cyan
@@ -2776,6 +2928,122 @@ function Test-VerifiedIdPrerequisites {
         Write-Host "     ⚠ Could not validate all permissions" -ForegroundColor Yellow
     }
     
+    # Test 5: Check Key Vault permissions for Verifiable Credentials Service principals.
+    # The vault can be in either Vault Access Policy mode (required by Verified ID) or RBAC mode.
+    # We detect the active mode and check accordingly; RBAC-only vaults will not work with Verified ID.
+    if ($KeyVaultName -or $KeyVaultResourceId) {
+        Write-Host "  5. Checking Key Vault permissions for Verifiable Credentials Service..." -ForegroundColor Yellow
+        try {
+            # Resolve the vault object to determine authorization model and read access policies
+            $vaultObj = if ($KeyVaultName) {
+                Get-AzKeyVault -VaultName $KeyVaultName -ErrorAction SilentlyContinue
+            }
+            else {
+                # Parse vault name from resource ID
+                $vaultNameFromId = ($KeyVaultResourceId -split '/')[-1]
+                Get-AzKeyVault -VaultName $vaultNameFromId -ErrorAction SilentlyContinue
+            }
+            $resolvedVaultName = if ($KeyVaultName) { $KeyVaultName } else { ($KeyVaultResourceId -split '/')[-1] }
+            
+            if (-not $vaultObj) {
+                Write-Host "     ⚠ Key Vault '$resolvedVaultName' not found or no access" -ForegroundColor Yellow
+            }
+            elseif ($vaultObj.EnableRbacAuthorization -eq $true) {
+                # ── RBAC mode ─────────────────────────────────────────────────────────────────
+                # Verified ID does NOT support pure RBAC Key Vaults — flag this as a hard error.
+                Write-Host "     ✗ Key Vault '$resolvedVaultName' is in RBAC authorization mode" -ForegroundColor Red
+                Write-Host "       Verified ID requires Vault Access Policy mode to perform signing operations" -ForegroundColor Red
+                Write-Host "       Switch via: Azure Portal > Key Vault > Settings > Access configuration > Vault access policy" -ForegroundColor Gray
+                $issues += "Key Vault '$resolvedVaultName' is in RBAC mode. " +
+                "Verified ID requires Vault Access Policy mode. " +
+                "Change via: `$kv = Get-AzResource -ResourceType 'Microsoft.KeyVault/vaults' -Name '$resolvedVaultName'; `$kv.Properties.enableRbacAuthorization = `$false; Set-AzResource -InputObject `$kv -Force"
+                
+                # Also check RBAC assignments so the user gets a complete picture
+                $vcAppIds = @(
+                    @{ AppId = '3db474b9-6a0c-4840-96ac-1fceb342124f'; DisplayName = 'Verifiable Credentials Service Request' },
+                    @{ AppId = '6a8b4b39-c021-437c-b060-5a14a3fd65f3'; DisplayName = 'Verifiable Credentials Service Admin' }
+                )
+                $cryptoRoleNames = @('Key Vault Crypto Officer', 'Key Vault Crypto User')
+                foreach ($vcApp in $vcAppIds) {
+                    $sp = Get-AzADServicePrincipal -ApplicationId $vcApp.AppId -ErrorAction SilentlyContinue
+                    if ($sp) {
+                        $assignments = if ($KeyVaultResourceId) {
+                            Get-AzRoleAssignment -ObjectId $sp.Id -Scope $KeyVaultResourceId -ErrorAction SilentlyContinue
+                        }
+                        else {
+                            Get-AzRoleAssignment -ObjectId $sp.Id -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Scope -match [regex]::Escape($resolvedVaultName) }
+                        }
+                        $hasRole = $assignments | Where-Object { $cryptoRoleNames -contains $_.RoleDefinitionName }
+                        if ($hasRole) {
+                            Write-Host "     ℹ '$($vcApp.DisplayName)' has RBAC Crypto role (but vault must be switched to Access Policy mode first)" -ForegroundColor Cyan
+                        }
+                    }
+                }
+            }
+            else {
+                # ── Access Policy mode (correct for Verified ID) ──────────────────────────────
+                Write-Host "     ✓ Key Vault '$resolvedVaultName' is in Vault Access Policy mode" -ForegroundColor Green
+                
+                $vcPolicyDefs = @(
+                    @{ AppId = '6a8b4b39-c021-437c-b060-5a14a3fd65f3'; DisplayName = 'Verifiable Credentials Service Admin'; RequiredKeys = @('Get', 'Create', 'Sign') },
+                    @{ AppId = '3db474b9-6a0c-4840-96ac-1fceb342124f'; DisplayName = 'Verifiable Credentials Service Request'; RequiredKeys = @('Sign') },
+                    @{ AppId = $null; DisplayName = 'Verifiable Credentials Service'; RequiredKeys = @('Get', 'Sign') }
+                )
+                
+                $existingPolicies = $vaultObj.AccessPolicies
+                $anyPolicyMissing = $false
+                
+                foreach ($def in $vcPolicyDefs) {
+                    $sp = if ($def.AppId) {
+                        Get-AzADServicePrincipal -ApplicationId $def.AppId -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        Get-AzADServicePrincipal -DisplayName $def.DisplayName -ErrorAction SilentlyContinue |
+                        Where-Object { $_.DisplayName -eq $def.DisplayName } | Select-Object -First 1
+                    }
+                    
+                    if (-not $sp) {
+                        Write-Host "     ℹ '$($def.DisplayName)' not yet in tenant (provisioned on first authority creation)" -ForegroundColor Cyan
+                        continue
+                    }
+                    
+                    $policy = $existingPolicies | Where-Object { $_.ObjectId -eq $sp.Id } | Select-Object -First 1
+                    
+                    if (-not $policy) {
+                        Write-Host "     ✗ '$($def.DisplayName)' has NO access policy on vault '$resolvedVaultName'" -ForegroundColor Red
+                        $issues += "'$($def.DisplayName)' is missing a Key Vault access policy on '$resolvedVaultName'. " +
+                        "Required key permissions: $($def.RequiredKeys -join ', ')."
+                        $anyPolicyMissing = $true
+                    }
+                    else {
+                        # Check that every required permission is present
+                        $grantedKeys = $policy.PermissionsToKeys
+                        $missingKeys = $def.RequiredKeys | Where-Object { $_ -notin $grantedKeys }
+                        if ($missingKeys) {
+                            Write-Host "     ✗ '$($def.DisplayName)' is missing key permissions on '$resolvedVaultName': $($missingKeys -join ', ')" -ForegroundColor Red
+                            $issues += "'$($def.DisplayName)' access policy on '$resolvedVaultName' is missing key permissions: $($missingKeys -join ', ')."
+                            $anyPolicyMissing = $true
+                        }
+                        else {
+                            Write-Host "     ✓ '$($def.DisplayName)' → Keys: $($grantedKeys -join ', ')" -ForegroundColor Green
+                        }
+                    }
+                }
+                
+                if (-not $anyPolicyMissing) {
+                    Write-Host "     ✓ All Verified ID service access policies are in place" -ForegroundColor Green
+                }
+            }
+        }
+        catch {
+            Write-Host "     ⚠ Could not check Key Vault permissions: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "  5. Skipping Key Vault permissions check (pass -KeyVaultName to enable)" -ForegroundColor Gray
+    }
+    
     # Summary
     if ($issues.Count -eq 0) {
         Write-Host "`n[SUCCESS] All prerequisites passed!" -ForegroundColor Green
@@ -2797,7 +3065,16 @@ function Test-VerifiedIdPrerequisites {
         Write-Host "      - Admin API: 6a8b4b39-c021-437c-b060-5a14a3fd65f3/.default" -ForegroundColor Gray
         Write-Host "   4. Try re-acquiring token:" -ForegroundColor White
         Write-Host "      - az logout && az login --tenant $TenantId" -ForegroundColor Gray
-        Write-Host "   5. Contact Azure support if tenant onboarding issues persist" -ForegroundColor White
+        Write-Host "   5. Check Key Vault permission model and access policies:" -ForegroundColor White
+        Write-Host "      - Verified ID REQUIRES Vault Access Policy mode (not RBAC)" -ForegroundColor Gray
+        Write-Host "        Switch: Azure Portal > Key Vault > Settings > Access configuration > Vault access policy" -ForegroundColor Gray
+        Write-Host "        Or:     `$kv = Get-AzResource -ResourceType 'Microsoft.KeyVault/vaults' -Name '<name>'; `$kv.Properties.enableRbacAuthorization = `$false; Set-AzResource -InputObject `$kv -Force" -ForegroundColor Gray
+        Write-Host "      - Then verify these access policies exist under Key Vault > Access policies:" -ForegroundColor Gray
+        Write-Host "          'Verifiable Credentials Service'         Key: Get, Sign" -ForegroundColor Gray
+        Write-Host "          'Verifiable Credentials Service Admin'   Key: Get, Create, Sign" -ForegroundColor Gray
+        Write-Host "          'Verifiable Credentials Service Request' Key: Sign" -ForegroundColor Gray
+        Write-Host "      - These policies can be accidentally removed and silently break signing" -ForegroundColor Gray
+        Write-Host "   6. Contact Azure support if tenant onboarding issues persist" -ForegroundColor White
         
         return $false
     }
